@@ -9,12 +9,14 @@ const TOMB_KEY = 'interstice:tombstones';
 const TOMB_TTL_MS = 90 * 24 * 3600 * 1000;
 
 const META_DEFAULTS = {
-  token: null,        // GitHub PAT
-  login: null,        // GitHub login (cached for UI)
-  gistId: null,       // The gist used for sync
-  lastSyncAt: null,   // epoch ms
-  lastError: null,    // string | null
-  autoSync: true,     // master toggle
+  token: null,             // GitHub PAT
+  login: null,             // GitHub login (cached for UI)
+  gistId: null,            // The gist used for sync
+  lastSyncAt: null,        // epoch ms
+  lastError: null,         // string | null
+  autoSync: true,          // master toggle
+  encryptionEnabled: false,// whether the gist is encrypted
+  encryptionSaltB64: null, // base64 salt that the cached key was derived from
 };
 
 export function getMeta() {

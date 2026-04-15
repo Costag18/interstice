@@ -12,7 +12,19 @@ import { exportAll, importAll, clearAll, estimateUsage, listAllEntries } from '.
 import { applyTheme } from '../theme.js';
 import { getPrefs, setPref } from '../helpers/prefs.js';
 import { setHTML, escapeHtml, escapeAttr } from '../safe-dom.js';
-import { connect, disconnect, syncNow, getSyncStatus, setAutoSync, onSyncStatus } from '../sync.js';
+import {
+  connect,
+  disconnect,
+  syncNow,
+  getSyncStatus,
+  setAutoSync,
+  onSyncStatus,
+  enableEncryption,
+  disableEncryption,
+  changePassphrase,
+  lockNow,
+  onPassphraseNeeded,
+} from '../sync.js';
 
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -143,7 +155,7 @@ export async function render(root) {
 
   // Sync section — interactive
   bindSyncSection(root);
-  const off = onSyncStatus(() => {
+  const offStatus = onSyncStatus(() => {
     const sec = root.querySelector('#sync-section');
     if (sec) {
       setHTML(sec, renderSyncSection());
@@ -151,7 +163,12 @@ export async function render(root) {
     }
   });
 
-  return { dispose() { off(); } };
+  // Passphrase modal — global, fires whenever sync needs to unlock.
+  const offPass = onPassphraseNeeded(({ submit, cancel, envelope }) => {
+    openPassphraseModal({ mode: 'unlock', submit, cancel, envelope });
+  });
+
+  return { dispose() { offStatus(); offPass(); } };
 }
 
 function themeBtn(t, active) {
@@ -279,6 +296,16 @@ function renderSyncSection() {
           <li>Repeat the same setup on your other device using the same GitHub account.</li>
         </ol>
       </details>
+
+      <div class="mb-4 bg-tertiary/10 border border-tertiary/30 rounded-xl p-4 flex gap-3">
+        <span class="material-symbols-outlined text-tertiary shrink-0">save</span>
+        <div class="font-body text-sm text-on-surface-variant leading-relaxed">
+          <strong class="text-on-surface">Save your token somewhere safe before closing the GitHub tab.</strong>
+          GitHub only shows the token <em>once</em> — after that you can't view it again. To set up sync on your other device, you'll need to paste this same token there.
+          Easiest path: email it to yourself, save it in a password manager, or send it to yourself in a private chat. Treat it like a password — it grants access to your gists.
+        </div>
+      </div>
+
       <div class="flex flex-col sm:flex-row gap-3 mb-4">
         <a href="${tokenLink}" target="_blank" rel="noopener noreferrer"
           class="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-primary-container text-on-primary-container font-label text-xs font-bold whitespace-nowrap hover:brightness-110">
@@ -327,7 +354,34 @@ function renderSyncSection() {
       View gist on GitHub
       <span class="material-symbols-outlined text-xs">open_in_new</span>
     </a>` : '<span class="font-label text-[11px] text-on-surface/40">Gist will be created on your first sync.</span>'}
-    ${status.error ? `<p class="mt-3 font-label text-xs text-error">${escapeHtml(status.error)}</p>` : ''}`;
+    ${status.error ? `<p class="mt-3 font-label text-xs text-error">${escapeHtml(status.error)}</p>` : ''}
+
+    ${renderEncryptionBlock(status)}`;
+}
+
+function renderEncryptionBlock(status) {
+  const heading = `<h4 class="font-headline text-base mt-8 mb-3 flex items-center gap-2">
+    <span class="material-symbols-outlined text-base ${status.encryptionEnabled ? 'text-secondary' : 'text-on-surface/40'}">${status.encryptionEnabled ? 'lock' : 'lock_open'}</span>
+    End-to-end encryption
+  </h4>`;
+
+  if (!status.encryptionEnabled) {
+    return `<div class="border-t border-outline-variant/10 pt-2">
+      ${heading}
+      <p class="font-body text-sm text-on-surface/60 mb-3 italic">Off — gist is private but readable by anyone with your GitHub token. Turn on encryption to wrap the gist in AES-256 with a passphrase only you know.</p>
+      <button id="enc-enable" class="px-5 py-2 rounded-full bg-secondary-container text-on-secondary-container font-label text-xs font-bold tracking-widest">ENCRYPT WITH A PASSPHRASE</button>
+    </div>`;
+  }
+
+  return `<div class="border-t border-outline-variant/10 pt-2">
+    ${heading}
+    <p class="font-body text-sm text-on-surface/60 mb-3">Gist is wrapped in <strong class="text-on-surface not-italic">AES-256-GCM</strong> with a key derived from your passphrase via <strong class="text-on-surface not-italic">PBKDF2-SHA256</strong> (600,000 iterations). Your passphrase never leaves this device. ${status.encryptionUnlocked ? '<span class="text-secondary">Currently unlocked on this device.</span>' : '<span class="text-tertiary">Currently locked.</span>'}</p>
+    <div class="flex flex-wrap gap-2">
+      <button id="enc-change" class="px-4 py-2 rounded-full border border-outline-variant text-on-surface-variant font-label text-xs">Change passphrase</button>
+      ${status.encryptionUnlocked ? '<button id="enc-lock" class="px-4 py-2 rounded-full border border-outline-variant text-on-surface-variant font-label text-xs">Lock now</button>' : ''}
+      <button id="enc-disable" class="ml-auto px-4 py-2 rounded-full border border-error/40 text-error font-label text-xs">Turn off encryption</button>
+    </div>
+  </div>`;
 }
 
 function phasePill(status) {
@@ -381,9 +435,137 @@ function bindSyncSection(root) {
 
   const disBtn = sec.querySelector('#sync-disconnect');
   if (disBtn) {
-    disBtn.addEventListener('click', () => {
+    disBtn.addEventListener('click', async () => {
       if (!confirm('Disconnect from GitHub? Your local entries are kept. The gist on GitHub stays — you can delete it manually if you like.')) return;
-      disconnect();
+      await disconnect();
     });
   }
+
+  // Encryption controls
+  const encEnable = sec.querySelector('#enc-enable');
+  if (encEnable) encEnable.addEventListener('click', () => openPassphraseModal({ mode: 'set' }));
+
+  const encChange = sec.querySelector('#enc-change');
+  if (encChange) encChange.addEventListener('click', () => openPassphraseModal({ mode: 'change' }));
+
+  const encLock = sec.querySelector('#enc-lock');
+  if (encLock) encLock.addEventListener('click', async () => {
+    await lockNow();
+    alert('Locked. The cached key has been wiped from this device. The next sync will require your passphrase again.');
+  });
+
+  const encDisable = sec.querySelector('#enc-disable');
+  if (encDisable) encDisable.addEventListener('click', async () => {
+    if (!confirm('Turn off encryption? Your gist will be rewritten as plaintext on the next push. Anyone with your GitHub token will be able to read its contents.')) return;
+    try { await disableEncryption(); }
+    catch (e) { alert(`Could not disable: ${e.message}`); }
+  });
+}
+
+// ─── Passphrase modal ──────────────────────────────────────────────────────
+//
+// mode: 'set' | 'change' | 'unlock'
+//   set    — first-time encryption setup. Two fields, big warning.
+//   change — rotate to a new passphrase. Two fields.
+//   unlock — provide passphrase to decrypt the existing gist. One field.
+function openPassphraseModal({ mode, submit, cancel, envelope } = {}) {
+  const root = document.getElementById('modal-root');
+  if (!root) return;
+
+  const titles = { set: 'Set a passphrase', change: 'Change your passphrase', unlock: 'Enter your passphrase' };
+  const blurbs = {
+    set: 'Choose a passphrase to encrypt your gist. Long random phrases are stronger than short cryptic ones.',
+    change: 'Pick a new passphrase. Your gist will be re-encrypted with it on the next push.',
+    unlock: 'Your gist is encrypted. Enter the passphrase you set when you first turned on encryption — most likely on your other device.',
+  };
+  const isUnlock = mode === 'unlock';
+
+  setHTML(
+    root,
+    `<div id="pp-bg" class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div class="w-full max-w-md bg-surface-container-low rounded-2xl shadow-2xl p-6 md:p-8" role="dialog" aria-modal="true">
+        <div class="flex justify-between items-start mb-4">
+          <h3 class="font-headline text-xl">${escapeHtml(titles[mode])}</h3>
+          <button id="pp-close" aria-label="Close" class="p-1 rounded hover:bg-surface-container text-on-surface/60">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        <p class="font-body text-sm text-on-surface/70 mb-4">${escapeHtml(blurbs[mode])}</p>
+        ${
+          mode === 'set'
+            ? `<div class="bg-error-container/15 border border-error/30 rounded-xl p-3 mb-4 flex gap-3">
+              <span class="material-symbols-outlined text-error shrink-0">warning</span>
+              <p class="font-body text-xs text-on-surface leading-relaxed">
+                <strong>If you forget this passphrase, your encrypted gist becomes unreadable forever.</strong>
+                Save it somewhere safe (a password manager is ideal). You'll need to type it once on every device that syncs.
+              </p>
+            </div>`
+            : ''
+        }
+        <input id="pp1" type="password" autocomplete="new-password" autofocus
+          placeholder="Passphrase"
+          class="w-full mb-3 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-3 font-mono text-sm focus:outline-none focus:border-primary" />
+        ${
+          isUnlock
+            ? ''
+            : `<input id="pp2" type="password" autocomplete="new-password"
+                placeholder="Confirm passphrase"
+                class="w-full mb-3 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-3 font-mono text-sm focus:outline-none focus:border-primary" />`
+        }
+        <div id="pp-error" class="font-label text-xs text-error mb-3 hidden"></div>
+        <div class="flex gap-3 justify-end">
+          <button id="pp-cancel" class="px-5 py-2 rounded-full border border-outline-variant text-on-surface-variant font-label text-xs">Cancel</button>
+          <button id="pp-submit" class="px-6 py-2 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">${isUnlock ? 'UNLOCK' : 'SAVE'}</button>
+        </div>
+      </div>
+    </div>`
+  );
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    setHTML(root, '');
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); doCancel(); }
+    if (e.key === 'Enter' && document.activeElement?.id?.startsWith('pp')) { e.preventDefault(); doSubmit(); }
+  };
+  document.addEventListener('keydown', onKey);
+
+  const errEl = root.querySelector('#pp-error');
+  const showError = (msg) => {
+    errEl.textContent = msg;
+    errEl.classList.remove('hidden');
+  };
+
+  const doCancel = () => {
+    if (cancel) cancel();
+    close();
+  };
+
+  const doSubmit = async () => {
+    const v1 = root.querySelector('#pp1').value;
+    const v2 = root.querySelector('#pp2')?.value;
+    if (!v1 || v1.length < 4) return showError('Passphrase too short (min 4 characters).');
+    if (!isUnlock && v1 !== v2) return showError("The two passphrases don't match.");
+
+    const submitBtn = root.querySelector('#pp-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = isUnlock ? 'UNLOCKING…' : 'SAVING…';
+    try {
+      if (mode === 'set') await enableEncryption(v1);
+      else if (mode === 'change') await changePassphrase(v1);
+      else if (mode === 'unlock') await submit(v1); // resolves the unlock promise; will throw if wrong
+      close();
+      if (mode === 'set') alert('Encryption is on. Your gist is now encrypted with your passphrase.');
+    } catch (e) {
+      showError(e.message || String(e));
+      submitBtn.disabled = false;
+      submitBtn.textContent = isUnlock ? 'UNLOCK' : 'SAVE';
+    }
+  };
+
+  root.querySelector('#pp-submit').addEventListener('click', doSubmit);
+  root.querySelector('#pp-cancel').addEventListener('click', doCancel);
+  root.querySelector('#pp-close').addEventListener('click', doCancel);
+  root.querySelector('#pp-bg').addEventListener('click', (e) => { if (e.target.id === 'pp-bg') doCancel(); });
 }

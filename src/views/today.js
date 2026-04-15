@@ -1,6 +1,6 @@
 // today.js — The main timeline view for the current day.
 
-import { listEntriesByDay, deleteEntry, getEntry, dayKey } from '../db.js';
+import { listEntriesByDay, deleteEntry, getEntry, dayKey, onDbChanged } from '../db.js';
 import {
   formatTime,
   formatDateLong,
@@ -43,10 +43,29 @@ export async function render(root) {
     );
     bindEntryActions(root, refresh);
     bindEmptyAction(root, refresh);
+    scrollToLatest(root);
   };
 
   await refresh();
-  return { dispose() {} };
+
+  // Auto-refresh whenever the DB changes — covers:
+  //   • local saves (FAB → modal → addEntry)
+  //   • local edits/deletes
+  //   • remote sync pulls
+  const off = onDbChanged(() => { refresh(); });
+  return { dispose() { off(); } };
+}
+
+// Scroll the most-recent entry into view. Entries render ascending,
+// so "latest" = the last <article> in the timeline.
+function scrollToLatest(root) {
+  // Defer so layout has finished
+  requestAnimationFrame(() => {
+    const articles = root.querySelectorAll('#timeline article');
+    const last = articles[articles.length - 1];
+    if (!last) return;
+    last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
 }
 
 function renderTimeline(entries) {

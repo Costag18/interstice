@@ -1,6 +1,6 @@
 // calendar.js — Month grid showing entry-count intensity per day, with a streak counter.
 
-import { listEntriesByRange, dayKey } from '../db.js';
+import { listEntriesByRange, dayKey, onDbChanged } from '../db.js';
 import { renderTopbar } from '../components/topbar.js';
 import { showFab } from '../components/fab.js';
 import { calcStreak } from '../helpers/date.js';
@@ -79,7 +79,9 @@ export async function render(root, params) {
     c.addEventListener('click', () => navigate(`#/day/${c.dataset.day}`));
   });
 
-  return { dispose() {} };
+  // Refresh on any DB change (local edit OR remote pull)
+  const off = onDbChanged(() => { render(root, params); });
+  return { dispose() { off(); } };
 }
 
 function renderDays(cursor, byDay) {

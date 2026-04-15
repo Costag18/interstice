@@ -12,18 +12,46 @@
 //
 // Conflicts: latest-updatedAt-wins per entry. Adequate for a personal journal.
 
-import { listAllEntries, syncImport, onDbChanged } from './db.js';
+import { listAllEntries, syncImport, onDbChanged, setMetaValue, getMetaValue, deleteMetaValue } from './db.js';
 import { getMeta, setMeta, getTombstones, mergeTombstones, clearMeta, clearTombstones } from './sync-meta.js';
+import {
+  deriveKey,
+  wrapWithKey,
+  unwrapWithKey,
+  isEncryptedEnvelope,
+  envelopeSalt,
+  SCHEMA_PLAIN,
+} from './crypto.js';
 
 const GIST_FILENAME = 'interstice.json';
 const GIST_DESCRIPTION = 'Interstice — interstitial journaling sync (private)';
-const PUSH_DEBOUNCE_MS = 5000;
+const PUSH_DEBOUNCE_MS = 1500;            // batched, but felt-as-instant
+const POLL_INTERVAL_MS = 20_000;           // when visible+connected, pull every 20s
+const KEY_CACHE_FIELD = 'sync-encryption-key';
 const STATE_LISTENERS = new Set();
+const PASSPHRASE_LISTENERS = new Set();
+
+// Module-scope unlock context — survives within a single page load.
+// Promise that resolves to the AES key once unlocked.
+let unlockPromise = null;
 
 let pushTimer = null;
 let inFlight = null;
 let dirtyDuringFlight = false;
-let state = { phase: 'idle', error: null }; // phase: idle | syncing | error | offline
+let state = { phase: 'idle', error: null, unlocked: false }; // phase: idle | syncing | error
+
+// ─── Tiny base64 helpers (mirror crypto.js's, kept local to avoid coupling) ─
+function bytesToB64(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function b64ToBytes(s) {
+  const bin = atob(s || '');
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -35,6 +63,8 @@ export function getSyncStatus() {
     gistId: meta.gistId,
     lastSyncAt: meta.lastSyncAt,
     autoSync: meta.autoSync,
+    encryptionEnabled: !!meta.encryptionEnabled,
+    encryptionUnlocked: state.unlocked,
     phase: state.phase,
     error: state.error,
   };
@@ -43,6 +73,70 @@ export function getSyncStatus() {
 export function onSyncStatus(fn) {
   STATE_LISTENERS.add(fn);
   return () => STATE_LISTENERS.delete(fn);
+}
+
+// UI subscribes here. The handler receives a callback `submit(passphrase)`
+// it should call once the user types the passphrase. Returns an unsubscribe.
+export function onPassphraseNeeded(fn) {
+  PASSPHRASE_LISTENERS.add(fn);
+  return () => PASSPHRASE_LISTENERS.delete(fn);
+}
+
+// ─── Encryption controls ────────────────────────────────────────────────────
+
+// Enable encryption with a fresh passphrase. Derives a key, caches it, and
+// triggers a push so the gist is rewritten as ciphertext immediately.
+export async function enableEncryption(passphrase) {
+  if (!passphrase || passphrase.length < 4) throw new Error('Passphrase too short.');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(passphrase, salt);
+  await setMetaValue(KEY_CACHE_FIELD, key);
+  setMeta({ encryptionEnabled: true, encryptionSaltB64: bytesToB64(salt) });
+  setState({ unlocked: true });
+  // Force a push so the gist is encrypted immediately.
+  await push();
+}
+
+// Provide passphrase to unlock an already-encrypted gist (used when this is
+// device #2 pulling an encrypted payload it can't decrypt yet).
+export async function unlock(passphrase, envelope) {
+  const salt = envelope ? envelopeSalt(envelope) : b64ToBytes(getMeta().encryptionSaltB64 || '');
+  if (!salt || !salt.length) throw new Error('Missing salt to derive key.');
+  const key = await deriveKey(passphrase, salt);
+  // Test the key against the envelope before caching.
+  if (envelope) await unwrapWithKey(key, envelope);
+  await setMetaValue(KEY_CACHE_FIELD, key);
+  setMeta({ encryptionEnabled: true, encryptionSaltB64: bytesToB64(salt) });
+  setState({ unlocked: true });
+  return key;
+}
+
+// Forget the cached key. Next pull/push will require the passphrase again.
+export async function lockNow() {
+  await deleteMetaValue(KEY_CACHE_FIELD);
+  unlockPromise = null;
+  setState({ unlocked: false });
+}
+
+// Turn encryption off entirely. The next push writes plaintext to the gist.
+export async function disableEncryption() {
+  await deleteMetaValue(KEY_CACHE_FIELD);
+  unlockPromise = null;
+  setMeta({ encryptionEnabled: false, encryptionSaltB64: null });
+  setState({ unlocked: false });
+  // Push immediately so the gist is rewritten as plaintext.
+  if (getMeta().token) await push();
+}
+
+// Rotate to a new passphrase. Requires the current key to be unlocked.
+export async function changePassphrase(newPassphrase) {
+  if (!newPassphrase || newPassphrase.length < 4) throw new Error('Passphrase too short.');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(newPassphrase, salt);
+  await setMetaValue(KEY_CACHE_FIELD, key);
+  setMeta({ encryptionEnabled: true, encryptionSaltB64: bytesToB64(salt) });
+  setState({ unlocked: true });
+  await push();
 }
 
 // Verify token + cache login + (optionally) discover an existing gist.
@@ -65,10 +159,12 @@ export async function connect(token) {
   return user.login;
 }
 
-export function disconnect() {
+export async function disconnect() {
   clearMeta();
   clearTombstones();
-  setState({ phase: 'idle', error: null });
+  await deleteMetaValue(KEY_CACHE_FIELD).catch(() => {});
+  unlockPromise = null;
+  setState({ phase: 'idle', error: null, unlocked: false });
 }
 
 export function setAutoSync(on) {
@@ -86,7 +182,24 @@ export async function pull() {
     const file = gist?.files?.[GIST_FILENAME];
     if (!file) throw new Error('Gist has no interstice.json file');
     const text = file.truncated ? await fetch(file.raw_url).then((r) => r.text()) : file.content;
-    const payload = JSON.parse(text);
+    let payload = JSON.parse(text);
+
+    // If the gist is encrypted, get/derive the key and decrypt.
+    if (isEncryptedEnvelope(payload)) {
+      // Remember encryption is in use (so a fresh device knows).
+      setMeta({ encryptionEnabled: true, encryptionSaltB64: payload.salt });
+      const key = await ensureUnlockedKey(payload);
+      const plaintext = await unwrapWithKey(key, payload);
+      payload = JSON.parse(plaintext);
+    } else if (meta.encryptionEnabled) {
+      // We expected encryption but got plaintext — gist was reset elsewhere.
+      // Don't auto-disable; warn and continue with plaintext.
+      console.warn('Gist is plaintext but encryption flag was set. Disabling.');
+      setMeta({ encryptionEnabled: false, encryptionSaltB64: null });
+      await deleteMetaValue(KEY_CACHE_FIELD);
+      setState({ unlocked: false });
+    }
+
     if (payload?.tombstones) mergeTombstones(payload.tombstones);
     await syncImport(payload);
     setMeta({ lastSyncAt: Date.now(), lastError: null });
@@ -107,16 +220,25 @@ export async function push() {
     const entries = await listAllEntries();
     const tombstones = getTombstones();
     const payload = {
-      schema: 'interstice/v1',
+      schema: SCHEMA_PLAIN,
       exportedAt: Date.now(),
       device: navigator.userAgent.slice(0, 80),
       entries,
       tombstones,
     };
-    const body = JSON.stringify(payload, null, 2);
+    const plaintext = JSON.stringify(payload, null, 2);
+
+    let body;
+    if (meta.encryptionEnabled) {
+      const key = await ensureUnlockedKey(); // may prompt UI
+      const salt = b64ToBytes(getMeta().encryptionSaltB64 || '');
+      const envelope = await wrapWithKey(key, salt, plaintext);
+      body = JSON.stringify(envelope);
+    } else {
+      body = plaintext;
+    }
 
     if (!meta.gistId) {
-      // Create
       const created = await ghFetch('/gists', {
         token: meta.token,
         method: 'POST',
@@ -128,7 +250,6 @@ export async function push() {
       });
       setMeta({ gistId: created.id });
     } else {
-      // Update
       await ghFetch(`/gists/${meta.gistId}`, {
         token: meta.token,
         method: 'PATCH',
@@ -141,6 +262,50 @@ export async function push() {
     setMeta({ lastError: String(e.message || e) });
     setState({ phase: 'error', error: String(e.message || e) });
     throw e;
+  }
+}
+
+// Resolve the cached key. If absent, fire the passphrase-needed event and
+// wait for the UI to call back with a passphrase.
+async function ensureUnlockedKey(envelopeForVerification = null) {
+  // Try cached key first
+  let key = await getMetaValue(KEY_CACHE_FIELD);
+  if (key) {
+    setState({ unlocked: true });
+    return key;
+  }
+  // Re-use any in-flight unlock attempt
+  if (unlockPromise) return unlockPromise;
+  unlockPromise = (async () => {
+    if (PASSPHRASE_LISTENERS.size === 0) {
+      throw new Error('Passphrase required but no UI is registered.');
+    }
+    return new Promise((resolve, reject) => {
+      let resolved = false;
+      const submit = async (passphrase) => {
+        if (resolved) return;
+        try {
+          const k = await unlock(passphrase, envelopeForVerification);
+          resolved = true;
+          resolve(k);
+        } catch (e) {
+          throw e; // re-throw so the modal can show "wrong passphrase"
+        }
+      };
+      const cancel = () => {
+        if (resolved) return;
+        resolved = true;
+        reject(new Error('Unlock cancelled.'));
+      };
+      for (const fn of PASSPHRASE_LISTENERS) {
+        try { fn({ submit, cancel, envelope: envelopeForVerification }); } catch (e) { console.warn(e); }
+      }
+    });
+  })();
+  try {
+    return await unlockPromise;
+  } finally {
+    unlockPromise = null;
   }
 }
 
@@ -166,7 +331,13 @@ export async function syncNow() {
 }
 
 // Wire up auto-sync. Call once at app boot.
-export function startAutoSync() {
+export async function startAutoSync() {
+  // Hydrate "unlocked" state if a cached key already exists
+  try {
+    const cached = await getMetaValue(KEY_CACHE_FIELD);
+    if (cached) setState({ unlocked: true });
+  } catch {}
+
   // Pull on boot
   if (getMeta().token && getMeta().autoSync) {
     syncNow().catch((e) => console.warn('Initial sync failed:', e));
@@ -178,10 +349,20 @@ export function startAutoSync() {
   // Pull when the tab regains focus
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && getMeta().token && getMeta().autoSync) {
-      // Fire-and-forget
       pull().catch(() => {});
     }
   });
+
+  // Periodic pull while the tab is visible and connected. Catches changes
+  // pushed from another device. Self-skips when in error state to avoid
+  // hammering after a bad token.
+  setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    const m = getMeta();
+    if (!m.token || !m.autoSync) return;
+    if (state.phase === 'syncing' || state.phase === 'error') return;
+    pull().catch(() => {});
+  }, POLL_INTERVAL_MS);
 }
 
 function scheduleAutoPush() {

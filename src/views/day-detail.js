@@ -1,6 +1,6 @@
 // day-detail.js — Past-day timeline + summary stats + mood sparkline.
 
-import { listEntriesByDay } from '../db.js';
+import { listEntriesByDay, onDbChanged } from '../db.js';
 import { formatTime, formatDateLong, parseDayKey, elapsedBetween } from '../helpers/date.js';
 import { showFab } from '../components/fab.js';
 import { navigate } from '../router.js';
@@ -56,7 +56,9 @@ export async function render(root, params) {
     if (history.length > 1) history.back();
     else navigate('#/calendar');
   });
-  return { dispose() {} };
+
+  const off = onDbChanged(() => { render(root, params); });
+  return { dispose() { off(); } };
 }
 
 function stat(label, value, icon) {

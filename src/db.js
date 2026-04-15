@@ -11,8 +11,9 @@
 // over the full set — fine for tens of thousands of entries.
 
 const DB_NAME = 'interstice';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'entries';
+const META_STORE = 'meta';
 
 let dbPromise;
 
@@ -20,12 +21,16 @@ export function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) {
         const store = db.createObjectStore(STORE, { keyPath: 'id' });
         store.createIndex('by_ts', 'ts');
         store.createIndex('by_day', 'day');
+      }
+      // v2: add meta store for caching the (non-extractable) AES key
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE);
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -37,6 +42,27 @@ export function openDB() {
 
 function tx(mode = 'readonly') {
   return openDB().then((db) => db.transaction(STORE, mode).objectStore(STORE));
+}
+
+function metaTx(mode = 'readonly') {
+  return openDB().then((db) => db.transaction(META_STORE, mode).objectStore(META_STORE));
+}
+
+// Cache an arbitrary value under a key in the meta store. CryptoKeys with
+// extractable=false are storable here via the structured-clone algorithm.
+export async function setMetaValue(key, value) {
+  const store = await metaTx('readwrite');
+  await req2promise(store.put(value, key));
+}
+
+export async function getMetaValue(key) {
+  const store = await metaTx();
+  return req2promise(store.get(key));
+}
+
+export async function deleteMetaValue(key) {
+  const store = await metaTx('readwrite');
+  await req2promise(store.delete(key));
 }
 
 function req2promise(req) {

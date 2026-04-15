@@ -53,10 +53,20 @@ function syncIndicator() {
       <span class="hidden sm:inline font-label text-[10px] uppercase tracking-widest">Sync error</span>
     </a>`;
   }
+  // Encrypted but locked — passphrase needed before next sync
+  if (s.encryptionEnabled && !s.encryptionUnlocked) {
+    return `<a href="#/settings" title="Encrypted gist — passphrase required to sync"
+      class="flex items-center gap-1.5 text-tertiary hover:text-on-surface transition">
+      <span class="material-symbols-outlined">lock</span>
+      <span class="hidden sm:inline font-label text-[10px] uppercase tracking-widest">Locked</span>
+    </a>`;
+  }
   const last = s.lastSyncAt ? relativeTime(s.lastSyncAt) : 'never';
-  return `<a href="#/settings" title="Last synced ${escapeHtml(last)}"
+  const lockedHint = s.encryptionEnabled ? ' — encrypted' : '';
+  const icon = s.encryptionEnabled ? 'lock' : 'cloud_done';
+  return `<a href="#/settings" title="Last synced ${escapeHtml(last)}${lockedHint}"
     class="flex items-center gap-1.5 text-secondary hover:text-on-surface transition">
-    <span class="material-symbols-outlined">cloud_done</span>
+    <span class="material-symbols-outlined">${icon}</span>
     <span class="hidden sm:inline font-label text-[10px] uppercase tracking-widest">${escapeHtml(last)}</span>
   </a>`;
 }

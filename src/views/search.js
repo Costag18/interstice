@@ -1,6 +1,6 @@
 // search.js — Live search across all entries with type/tag/mood filters.
 
-import { searchEntries, getAllTags } from '../db.js';
+import { searchEntries, getAllTags, onDbChanged } from '../db.js';
 import { formatDateShort, formatWeekday } from '../helpers/date.js';
 import { renderTopbar } from '../components/topbar.js';
 import { showFab } from '../components/fab.js';
@@ -71,6 +71,8 @@ export async function render(root, params) {
   });
 
   await run();
+  // Re-run the search if entries arrive via remote sync
+  const off = onDbChanged(() => { run(); });
 
   async function run() {
     const results = await searchEntries(state);
@@ -92,7 +94,7 @@ export async function render(root, params) {
     });
   }
 
-  return { dispose() {} };
+  return { dispose() { off(); } };
 }
 
 function card(e, q) {
