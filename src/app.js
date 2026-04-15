@@ -12,12 +12,14 @@ import { mountRouter } from './router.js';
 import { renderNav } from './components/nav.js';
 import { registerShortcuts } from './shortcuts.js';
 import { getPrefs } from './helpers/prefs.js';
+import { startAutoSync } from './sync.js';
 
 async function boot() {
   applyStoredTheme();
   await openDB();
   renderNav(document.getElementById('nav-root'));
   registerShortcuts();
+  startAutoSync(); // pulls on boot if a token is stored, debounces pushes after writes
 
   // First-launch redirect to onboarding (only if no explicit hash already).
   if (!getPrefs().onboarded && !location.hash) {

@@ -11,7 +11,8 @@ import { showFab } from '../components/fab.js';
 import { exportAll, importAll, clearAll, estimateUsage, listAllEntries } from '../db.js';
 import { applyTheme } from '../theme.js';
 import { getPrefs, setPref } from '../helpers/prefs.js';
-import { setHTML, escapeHtml } from '../safe-dom.js';
+import { setHTML, escapeHtml, escapeAttr } from '../safe-dom.js';
+import { connect, disconnect, syncNow, getSyncStatus, setAutoSync, onSyncStatus } from '../sync.js';
 
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -40,6 +41,10 @@ export async function render(root) {
           ${themeBtn('light', prefs.theme === 'light')}
           ${themeBtn('system', prefs.theme === 'system')}
         </div>
+      </div>
+
+      <div class="bg-surface-container-low rounded-2xl p-6" id="sync-section">
+        ${renderSyncSection()}
       </div>
 
       <div class="bg-surface-container-low rounded-2xl p-6">
@@ -136,7 +141,17 @@ export async function render(root) {
   root.querySelector('#install').addEventListener('click', triggerInstall);
   root.querySelector('#clear').addEventListener('click', confirmClear);
 
-  return { dispose() {} };
+  // Sync section — interactive
+  bindSyncSection(root);
+  const off = onSyncStatus(() => {
+    const sec = root.querySelector('#sync-section');
+    if (sec) {
+      setHTML(sec, renderSyncSection());
+      bindSyncSection(root);
+    }
+  });
+
+  return { dispose() { off(); } };
 }
 
 function themeBtn(t, active) {
@@ -237,4 +252,138 @@ function stamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
+// ─── Sync section ────────────────────────────────────────────────────────────
+
+function renderSyncSection() {
+  const status = getSyncStatus();
+  const tokenLink =
+    'https://github.com/settings/tokens/new?scopes=gist&description=Interstice%20Sync';
+  const header = `<h3 class="font-headline text-xl mb-3 flex items-center gap-2">
+    <span class="material-symbols-outlined text-tertiary">cloud_sync</span>Sync (private GitHub gist)
+  </h3>`;
+
+  if (!status.connected) {
+    return `${header}
+      <p class="font-body text-sm text-on-surface/60 mb-4 italic">Optional. Sync your entries between devices via a private gist on your GitHub account. Stays under your control. Disconnect anytime.</p>
+      <details class="mb-4 bg-surface-container rounded-xl p-4 group">
+        <summary class="font-label text-xs cursor-pointer flex items-center gap-2 select-none">
+          <span class="material-symbols-outlined text-base group-open:rotate-90 transition-transform">chevron_right</span>
+          How it works
+        </summary>
+        <ol class="font-body text-sm text-on-surface-variant mt-3 ml-2 space-y-2 list-decimal list-inside">
+          <li>Open GitHub and create a token with <code class="font-mono text-tertiary">gist</code> scope.</li>
+          <li>Copy the token. Paste it below, then click Connect.</li>
+          <li>The app creates one private gist on your account and syncs to it.</li>
+          <li>Repeat the same setup on your other device using the same GitHub account.</li>
+        </ol>
+      </details>
+      <div class="flex flex-col sm:flex-row gap-3 mb-4">
+        <a href="${tokenLink}" target="_blank" rel="noopener noreferrer"
+          class="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-primary-container text-on-primary-container font-label text-xs font-bold whitespace-nowrap hover:brightness-110">
+          <span class="material-symbols-outlined text-base">open_in_new</span>
+          1. Open GitHub to create token
+        </a>
+      </div>
+      <div class="flex flex-col sm:flex-row gap-3">
+        <input id="gh-token" type="password" autocomplete="off" spellcheck="false" placeholder="2. Paste token here (ghp_… or github_pat_…)"
+          class="flex-1 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-2 font-mono text-xs focus:outline-none focus:border-primary" />
+        <button id="gh-connect" class="px-6 py-2.5 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">CONNECT</button>
+      </div>
+      ${status.error ? `<p class="mt-3 font-label text-xs text-error">${escapeHtml(status.error)}</p>` : ''}`;
+  }
+
+  const last = status.lastSyncAt
+    ? new Date(status.lastSyncAt).toLocaleString(undefined, {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      })
+    : 'never';
+  const phaseChip = phasePill(status);
+
+  return `${header}
+    <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="material-symbols-outlined text-secondary">person</span>
+        <div class="min-w-0">
+          <div class="font-label text-sm font-semibold truncate">${escapeHtml(status.login || '?')}</div>
+          <div class="font-label text-[11px] text-on-surface/50">Last sync: ${escapeHtml(last)}</div>
+        </div>
+      </div>
+      ${phaseChip}
+    </div>
+
+    <div class="flex flex-wrap gap-3 mb-4">
+      <button id="sync-now" class="px-5 py-2.5 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">SYNC NOW</button>
+      <label class="flex items-center gap-2 px-4 py-2.5 rounded-full bg-surface-container font-label text-xs cursor-pointer">
+        <input id="auto-sync" type="checkbox" ${status.autoSync ? 'checked' : ''} class="rounded text-primary" />
+        Auto-sync
+      </label>
+      <button id="sync-disconnect" class="ml-auto px-5 py-2.5 rounded-full border border-error/40 text-error font-label text-xs font-bold tracking-widest hover:bg-error-container/20">DISCONNECT</button>
+    </div>
+
+    ${status.gistId ? `<a href="https://gist.github.com/${escapeAttr(status.gistId)}" target="_blank" rel="noopener noreferrer"
+      class="font-label text-[11px] text-on-surface/40 hover:text-primary inline-flex items-center gap-1">
+      View gist on GitHub
+      <span class="material-symbols-outlined text-xs">open_in_new</span>
+    </a>` : '<span class="font-label text-[11px] text-on-surface/40">Gist will be created on your first sync.</span>'}
+    ${status.error ? `<p class="mt-3 font-label text-xs text-error">${escapeHtml(status.error)}</p>` : ''}`;
+}
+
+function phasePill(status) {
+  if (status.phase === 'syncing')
+    return `<span class="font-label text-[10px] uppercase tracking-widest text-tertiary flex items-center gap-2">
+      <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>Syncing</span>`;
+  if (status.phase === 'error')
+    return `<span class="font-label text-[10px] uppercase tracking-widest text-error">Error</span>`;
+  return `<span class="font-label text-[10px] uppercase tracking-widest text-secondary flex items-center gap-1">
+    <span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>OK</span>`;
+}
+
+function bindSyncSection(root) {
+  const sec = root.querySelector('#sync-section');
+  if (!sec) return;
+
+  // Disconnected state
+  const tokenInput = sec.querySelector('#gh-token');
+  const connectBtn = sec.querySelector('#gh-connect');
+  if (connectBtn) {
+    connectBtn.addEventListener('click', async () => {
+      const token = tokenInput.value.trim();
+      if (!token) { tokenInput.focus(); return; }
+      connectBtn.textContent = 'CONNECTING…';
+      connectBtn.disabled = true;
+      try {
+        const login = await connect(token);
+        // Trigger first sync immediately
+        await syncNow();
+        // status listener will re-render
+        alert(`Connected as ${login}. First sync complete.`);
+      } catch (e) {
+        alert(`Connect failed: ${e.message}`);
+        connectBtn.textContent = 'CONNECT';
+        connectBtn.disabled = false;
+      }
+    });
+    tokenInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectBtn.click(); });
+  }
+
+  // Connected state
+  const syncBtn = sec.querySelector('#sync-now');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', async () => {
+      try { await syncNow(); }
+      catch (e) { alert(`Sync failed: ${e.message}`); }
+    });
+  }
+  const autoBox = sec.querySelector('#auto-sync');
+  if (autoBox) autoBox.addEventListener('change', (e) => setAutoSync(e.target.checked));
+
+  const disBtn = sec.querySelector('#sync-disconnect');
+  if (disBtn) {
+    disBtn.addEventListener('click', () => {
+      if (!confirm('Disconnect from GitHub? Your local entries are kept. The gist on GitHub stays — you can delete it manually if you like.')) return;
+      disconnect();
+    });
+  }
 }

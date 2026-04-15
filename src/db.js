@@ -82,6 +82,7 @@ export async function addEntry(partial) {
   };
   const store = await tx('readwrite');
   await req2promise(store.add(entry));
+  notifyChanged();
   return entry;
 }
 
@@ -92,12 +93,68 @@ export async function updateEntry(id, patch) {
   const merged = { ...existing, ...patch, updatedAt: Date.now() };
   if (patch.ts && patch.ts !== existing.ts) merged.day = dayKey(patch.ts);
   await req2promise(store.put(merged));
+  notifyChanged();
   return merged;
 }
 
 export async function deleteEntry(id) {
   const store = await tx('readwrite');
   await req2promise(store.delete(id));
+  // Record a tombstone so sync can propagate the deletion to other devices.
+  try {
+    const { recordTombstone } = await import('./sync-meta.js');
+    recordTombstone(id);
+  } catch {
+    /* sync metadata is best-effort */
+  }
+  notifyChanged();
+}
+
+// Sync helper: import a synced payload that may include tombstones.
+// Resolution rules:
+//   1. Apply remote tombstones first — delete those entries from local DB.
+//   2. For every remote entry: keep whichever side has the larger `updatedAt`.
+//   3. Local-only entries are left alone (they'll be pushed on the next sync).
+export async function syncImport(payload) {
+  if (!payload || payload.schema !== 'interstice/v1' || !Array.isArray(payload.entries)) {
+    throw new Error('Invalid sync payload');
+  }
+  const remoteTombstones = payload.tombstones || {};
+  const store = await tx('readwrite');
+
+  // Apply remote tombstones (skip notifyChanged so we don't spam listeners)
+  for (const id of Object.keys(remoteTombstones)) {
+    try { await req2promise(store.delete(id)); } catch {}
+  }
+
+  // Merge entries by id — latest updatedAt wins
+  for (const remote of payload.entries) {
+    if (!remote.id || !remote.ts) continue;
+    if (remoteTombstones[remote.id]) continue; // deleted
+    const existing = await req2promise(store.get(remote.id));
+    if (!existing || (remote.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+      await req2promise(
+        store.put({
+          ...remote,
+          day: remote.day ?? dayKey(remote.ts),
+          tags: Array.isArray(remote.tags) ? remote.tags : [],
+        })
+      );
+    }
+  }
+  notifyChanged();
+}
+
+// ─── Change notifications (used by sync's debounced auto-push) ──────────────
+const listeners = new Set();
+export function onDbChanged(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+function notifyChanged() {
+  for (const fn of listeners) {
+    try { fn(); } catch {}
+  }
 }
 
 export async function getEntry(id) {
