@@ -27,6 +27,8 @@ const GIST_FILENAME = 'interstice.json';
 const GIST_DESCRIPTION = 'Interstice — interstitial journaling sync (private)';
 const PUSH_DEBOUNCE_MS = 1500;            // batched, but felt-as-instant
 const POLL_INTERVAL_MS = 20_000;           // when visible+connected, pull every 20s
+const ERROR_BACKOFF_MIN_MS = 30_000;       // after first error, wait 30s
+const ERROR_BACKOFF_MAX_MS = 5 * 60_000;   // cap at 5 minutes
 const KEY_CACHE_FIELD = 'sync-encryption-key';
 const STATE_LISTENERS = new Set();
 const PASSPHRASE_LISTENERS = new Set();
@@ -38,6 +40,8 @@ let unlockPromise = null;
 let pushTimer = null;
 let inFlight = null;
 let dirtyDuringFlight = false;
+let consecutiveErrors = 0;               // drives polling backoff
+let nextPollDueAt = 0;                   // wall-clock ms; polling loop skips until then
 let state = { phase: 'idle', error: null, unlocked: false }; // phase: idle | syncing | error
 
 // ─── Tiny base64 helpers (mirror crypto.js's, kept local to avoid coupling) ─
@@ -139,11 +143,34 @@ export async function changePassphrase(newPassphrase) {
   await push();
 }
 
+// Quick format sanity check — does this look like a plausible GitHub token?
+// Classic PAT: ghp_ followed by 36 chars = 40 total.
+// Fine-grained: github_pat_ followed by ~82 chars = 93 total. (Fine-grained
+// tokens can NOT access gists, so we warn up front if we see one.)
+export function validateTokenShape(raw) {
+  const token = String(raw || '').trim();
+  if (token.length < 20) return { ok: false, reason: 'Token is too short. Classic PATs look like "ghp_…" (40 chars).' };
+  if (token.startsWith('github_pat_')) {
+    return {
+      ok: false,
+      reason: 'This is a FINE-GRAINED token. Fine-grained tokens can\'t access gists — GitHub rejects them with 403. You need a CLASSIC token (starts with "ghp_").',
+    };
+  }
+  if (!token.startsWith('ghp_')) {
+    return {
+      ok: false,
+      reason: 'This doesn\'t look like a classic GitHub personal access token. Expected format: "ghp_" followed by 36 characters.',
+    };
+  }
+  return { ok: true, token };
+}
+
 // Verify token + cache login + (optionally) discover an existing gist.
 export async function connect(token) {
-  if (!token || typeof token !== 'string' || token.length < 20) {
-    throw new Error('Token looks invalid.');
-  }
+  const check = validateTokenShape(token);
+  if (!check.ok) throw new Error(check.reason);
+  token = check.token;
+
   const user = await ghFetch('/user', { token });
   if (!user.login) throw new Error('Token rejected by GitHub.');
   setMeta({ token, login: user.login, lastError: null });
@@ -156,6 +183,7 @@ export async function connect(token) {
   if (existing) {
     setMeta({ gistId: existing.id });
   }
+  recordSuccess();
   return user.login;
 }
 
@@ -204,7 +232,9 @@ export async function pull() {
     await syncImport(payload);
     setMeta({ lastSyncAt: Date.now(), lastError: null });
     setState({ phase: 'idle', error: null });
+    recordSuccess();
   } catch (e) {
+    recordFailure();
     setMeta({ lastError: String(e.message || e) });
     setState({ phase: 'error', error: String(e.message || e) });
     throw e;
@@ -258,11 +288,25 @@ export async function push() {
     }
     setMeta({ lastSyncAt: Date.now(), lastError: null });
     setState({ phase: 'idle', error: null });
+    recordSuccess();
   } catch (e) {
+    recordFailure();
     setMeta({ lastError: String(e.message || e) });
     setState({ phase: 'error', error: String(e.message || e) });
     throw e;
   }
+}
+
+function recordSuccess() {
+  consecutiveErrors = 0;
+  nextPollDueAt = 0;
+}
+
+function recordFailure() {
+  consecutiveErrors++;
+  // 30s, 60s, 120s, 240s, 300s (cap)
+  const delay = Math.min(ERROR_BACKOFF_MIN_MS * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_MAX_MS);
+  nextPollDueAt = Date.now() + delay;
 }
 
 // Resolve the cached key. If absent, fire the passphrase-needed event and
@@ -310,11 +354,14 @@ async function ensureUnlockedKey(envelopeForVerification = null) {
 }
 
 // Pull-then-push, with reentrancy protection.
+// Always bypasses the polling backoff — user clicked a button, they're telling
+// the app to try NOW regardless of recent failures.
 export async function syncNow() {
   if (inFlight) {
     dirtyDuringFlight = true;
     return inFlight;
   }
+  nextPollDueAt = 0; // manual action resets the backoff so the next poll can fire normally
   inFlight = (async () => {
     try {
       await pull();
@@ -354,13 +401,20 @@ export async function startAutoSync() {
   });
 
   // Periodic pull while the tab is visible and connected. Catches changes
-  // pushed from another device. Self-skips when in error state to avoid
-  // hammering after a bad token.
+  // pushed from another device.
+  //
+  // Important change from the earlier impl: we DO retry when state.phase is
+  // 'error'. If the error was transient (GitHub hiccup, flaky network, brief
+  // rate limit), we recover on our own. To avoid hammering when the error is
+  // persistent (bad token), consecutive failures increase a backoff delay
+  // (30s → 60s → 120s → ... capped at 5min). The backoff resets on any
+  // success, and also on any manual syncNow / reconnect.
   setInterval(() => {
     if (document.visibilityState !== 'visible') return;
     const m = getMeta();
     if (!m.token || !m.autoSync) return;
-    if (state.phase === 'syncing' || state.phase === 'error') return;
+    if (state.phase === 'syncing') return;
+    if (Date.now() < nextPollDueAt) return;
     pull().catch(() => {});
   }, POLL_INTERVAL_MS);
 }

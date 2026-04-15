@@ -24,6 +24,7 @@ import {
   changePassphrase,
   lockNow,
   onPassphraseNeeded,
+  validateTokenShape,
 } from '../sync.js';
 
 let deferredInstall = null;
@@ -31,6 +32,18 @@ window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   deferredInstall = e;
 });
+
+// Shared toast used by sync actions to give the user visible success feedback
+// (the banner disappearing alone feels silent on mobile).
+function toast(msg) {
+  const root = document.getElementById('toast-root');
+  if (!root) return;
+  const el = document.createElement('div');
+  el.className = 'toast bg-surface-container-high text-on-surface px-4 py-2 rounded-full shadow-xl font-label text-xs flex items-center gap-2 border border-outline-variant/20';
+  setHTML(el, `<span class="material-symbols-outlined text-base text-secondary">check_circle</span>${escapeHtml(msg)}`);
+  root.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
 
 export async function render(root) {
   showFab();
@@ -358,16 +371,26 @@ function renderSyncSection() {
           <p>The link below opens the classic-token page with the <code class="font-mono text-tertiary">gist</code> scope pre-selected. Just click <em>Generate</em>, copy the <code class="font-mono text-tertiary">ghp_...</code> token, and paste it below.</p>
         </div>
       </details>
-      <div class="mt-3 flex flex-col sm:flex-row gap-3">
-        <a href="${tokenLinkForReconnect}" target="_blank" rel="noopener noreferrer"
-          class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full bg-primary-container text-on-primary-container font-label text-xs font-bold whitespace-nowrap hover:brightness-110">
-          <span class="material-symbols-outlined text-base">open_in_new</span>
-          Create a new classic token
-        </a>
-        <input id="gh-retoken" type="password" autocomplete="off" spellcheck="false" placeholder="Paste new ghp_… token"
-          class="flex-1 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-2 font-mono text-xs focus:outline-none focus:border-primary" />
-        <button id="gh-retoken-apply" class="px-5 py-2 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">RECONNECT</button>
+      <div class="mt-3 flex flex-wrap gap-3">
+        <button id="sync-retry-now" class="px-4 py-2 rounded-full border border-tertiary/40 text-tertiary font-label text-xs font-bold tracking-widest hover:bg-tertiary/10">
+          <span class="material-symbols-outlined text-base align-middle">refresh</span>
+          TRY AGAIN
+        </button>
+        <span class="font-label text-[11px] text-on-surface/40 self-center">If the error was a hiccup, this fixes it without a new token.</span>
       </div>
+      <details class="mt-4">
+        <summary class="cursor-pointer font-label text-xs text-on-surface-variant hover:text-on-surface">Still failing? Replace the token →</summary>
+        <div class="mt-3 flex flex-col sm:flex-row gap-3">
+          <a href="${tokenLinkForReconnect}" target="_blank" rel="noopener noreferrer"
+            class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full bg-primary-container text-on-primary-container font-label text-xs font-bold whitespace-nowrap hover:brightness-110">
+            <span class="material-symbols-outlined text-base">open_in_new</span>
+            New classic token
+          </a>
+          <input id="gh-retoken" type="password" autocomplete="off" spellcheck="false" placeholder="Paste new ghp_… token"
+            class="flex-1 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-2 font-mono text-xs focus:outline-none focus:border-primary" />
+          <button id="gh-retoken-apply" class="px-5 py-2 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">RECONNECT</button>
+        </div>
+      </details>
     </div>` : '';
 
   return `${header}
@@ -484,6 +507,26 @@ function bindSyncSection(root) {
     });
   }
 
+  // "Try again" — retry with the existing token. Covers the most common case:
+  // the 403 was a transient hiccup, the token is fine, we just need to retry.
+  const retryNow = sec.querySelector('#sync-retry-now');
+  if (retryNow) {
+    retryNow.addEventListener('click', async () => {
+      retryNow.disabled = true;
+      const original = retryNow.innerHTML;
+      setHTML(retryNow, `<span class="material-symbols-outlined text-base align-middle animate-spin">progress_activity</span> RETRYING…`);
+      try {
+        await syncNow();
+        toast('✓ Sync recovered');
+      } catch (e) {
+        alert(`Still failing: ${e.message}\n\nIf this keeps happening, your token may need to be replaced. Use the "Replace the token" section below.`);
+      } finally {
+        retryNow.disabled = false;
+        setHTML(retryNow, original);
+      }
+    });
+  }
+
   // Error-state reconnect: swap the token in place without full disconnect,
   // so the existing gistId and encryption state are preserved.
   const retokenApply = sec.querySelector('#gh-retoken-apply');
@@ -492,15 +535,36 @@ function bindSyncSection(root) {
     retokenApply.addEventListener('click', async () => {
       const token = retokenInput.value.trim();
       if (!token) { retokenInput.focus(); return; }
-      retokenApply.textContent = 'RECONNECTING…';
+
+      // Client-side format check BEFORE we hit GitHub. Surfaces
+      // fine-grained-token mistakes instantly instead of making the user wait
+      // for a network round-trip.
+      const check = validateTokenShape(token);
+      if (!check.ok) {
+        alert(`Token format issue:\n\n${check.reason}`);
+        retokenInput.focus();
+        retokenInput.select();
+        return;
+      }
+
+      retokenApply.textContent = 'CONNECTING…';
       retokenApply.disabled = true;
       try {
-        await connect(token);
+        const login = await connect(token);
+        // Now actually push/pull with the new token.
         await syncNow();
+        // Explicit success so the user knows it worked — the error banner will
+        // also disappear via the status listener, but that can feel silent.
+        toast(`✓ Reconnected as ${login}`);
       } catch (e) {
         alert(`Reconnect failed: ${e.message}`);
-        retokenApply.textContent = 'RECONNECT';
-        retokenApply.disabled = false;
+      } finally {
+        // Always restore button state — the banner may also disappear via
+        // status listener re-render, in which case this no-ops.
+        if (document.contains(retokenApply)) {
+          retokenApply.textContent = 'RECONNECT';
+          retokenApply.disabled = false;
+        }
       }
     });
     retokenInput.addEventListener('keydown', (e) => {
