@@ -290,12 +290,21 @@ function renderSyncSection() {
           How it works
         </summary>
         <ol class="font-body text-sm text-on-surface-variant mt-3 ml-2 space-y-2 list-decimal list-inside">
-          <li>Open GitHub and create a token with <code class="font-mono text-tertiary">gist</code> scope.</li>
-          <li>Copy the token. Paste it below, then click Connect.</li>
+          <li>Open GitHub and create a <strong class="text-on-surface">classic</strong> personal access token with <code class="font-mono text-tertiary">gist</code> scope.</li>
+          <li>Copy the token (looks like <code class="font-mono text-tertiary">ghp_…</code>). Paste it below and click Connect.</li>
           <li>The app creates one private gist on your account and syncs to it.</li>
           <li>Repeat the same setup on your other device using the same GitHub account.</li>
         </ol>
       </details>
+
+      <div class="mb-4 bg-error-container/15 border border-error/30 rounded-xl p-4 flex gap-3">
+        <span class="material-symbols-outlined text-error shrink-0">warning</span>
+        <div class="font-body text-sm text-on-surface-variant leading-relaxed">
+          <strong class="text-on-surface">Use a CLASSIC token, not fine-grained.</strong>
+          GitHub offers two kinds. Interstice needs the <strong>classic</strong> one (starts with <code class="font-mono text-tertiary">ghp_</code>). Fine-grained tokens (<code class="font-mono text-tertiary">github_pat_</code>) can't access gists at all and will fail with a 403 error.
+          The button below opens the right page with the correct token type + scope pre-selected.
+        </div>
+      </div>
 
       <div class="mb-4 bg-tertiary/10 border border-tertiary/30 rounded-xl p-4 flex gap-3">
         <span class="material-symbols-outlined text-tertiary shrink-0">save</span>
@@ -327,8 +336,42 @@ function renderSyncSection() {
       })
     : 'never';
   const phaseChip = phasePill(status);
+  const tokenLinkForReconnect =
+    'https://github.com/settings/tokens/new?scopes=gist&description=Interstice%20Sync';
+
+  // Surface a clear recovery path when the token fails auth.
+  const errorBanner = status.phase === 'error' && status.error ? `
+    <div class="mb-5 bg-error-container/15 border border-error/40 rounded-xl p-4">
+      <div class="flex gap-3 items-start mb-3">
+        <span class="material-symbols-outlined text-error shrink-0">error</span>
+        <div class="font-body text-sm text-on-surface leading-relaxed">
+          <strong class="text-error">Sync can't reach GitHub right now.</strong>
+          <p class="mt-1 text-on-surface-variant">${escapeHtml(status.error)}</p>
+        </div>
+      </div>
+      <details class="mt-2">
+        <summary class="cursor-pointer font-label text-xs text-on-surface-variant hover:text-on-surface">
+          Need a new token? Quick guide
+        </summary>
+        <div class="mt-3 ml-2 font-body text-sm text-on-surface-variant space-y-2">
+          <p><strong class="text-on-surface">Important:</strong> Interstice needs a <strong>classic</strong> personal access token, not a fine-grained one. Fine-grained tokens (<code class="font-mono text-tertiary">github_pat_...</code>) don't support gists at all.</p>
+          <p>The link below opens the classic-token page with the <code class="font-mono text-tertiary">gist</code> scope pre-selected. Just click <em>Generate</em>, copy the <code class="font-mono text-tertiary">ghp_...</code> token, and paste it below.</p>
+        </div>
+      </details>
+      <div class="mt-3 flex flex-col sm:flex-row gap-3">
+        <a href="${tokenLinkForReconnect}" target="_blank" rel="noopener noreferrer"
+          class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full bg-primary-container text-on-primary-container font-label text-xs font-bold whitespace-nowrap hover:brightness-110">
+          <span class="material-symbols-outlined text-base">open_in_new</span>
+          Create a new classic token
+        </a>
+        <input id="gh-retoken" type="password" autocomplete="off" spellcheck="false" placeholder="Paste new ghp_… token"
+          class="flex-1 bg-surface-container border border-outline-variant/30 rounded-xl px-4 py-2 font-mono text-xs focus:outline-none focus:border-primary" />
+        <button id="gh-retoken-apply" class="px-5 py-2 rounded-full bg-primary text-on-primary font-label text-xs font-bold tracking-widest">RECONNECT</button>
+      </div>
+    </div>` : '';
 
   return `${header}
+    ${errorBanner}
     <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
       <div class="flex items-center gap-3 min-w-0">
         <span class="material-symbols-outlined text-secondary">person</span>
@@ -438,6 +481,30 @@ function bindSyncSection(root) {
     disBtn.addEventListener('click', async () => {
       if (!confirm('Disconnect from GitHub? Your local entries are kept. The gist on GitHub stays — you can delete it manually if you like.')) return;
       await disconnect();
+    });
+  }
+
+  // Error-state reconnect: swap the token in place without full disconnect,
+  // so the existing gistId and encryption state are preserved.
+  const retokenApply = sec.querySelector('#gh-retoken-apply');
+  if (retokenApply) {
+    const retokenInput = sec.querySelector('#gh-retoken');
+    retokenApply.addEventListener('click', async () => {
+      const token = retokenInput.value.trim();
+      if (!token) { retokenInput.focus(); return; }
+      retokenApply.textContent = 'RECONNECTING…';
+      retokenApply.disabled = true;
+      try {
+        await connect(token);
+        await syncNow();
+      } catch (e) {
+        alert(`Reconnect failed: ${e.message}`);
+        retokenApply.textContent = 'RECONNECT';
+        retokenApply.disabled = false;
+      }
+    });
+    retokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') retokenApply.click();
     });
   }
 

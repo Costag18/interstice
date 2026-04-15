@@ -388,8 +388,21 @@ async function ghFetch(path, { token, method = 'GET', body } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (resp.status === 401) throw new Error('GitHub token rejected (401). Reconnect with a fresh token.');
-  if (resp.status === 403) throw new Error('GitHub denied the request (403). Token may be missing the `gist` scope.');
+  if (resp.status === 401) {
+    throw new Error(
+      'GitHub rejected the token (401). It was revoked, expired, or typed wrong. ' +
+      'Create a new CLASSIC token with the "gist" scope and reconnect.'
+    );
+  }
+  if (resp.status === 403) {
+    // The most common cause of 403 on /gists is using a fine-grained PAT
+    // (github_pat_...). Fine-grained PATs do not support gists at all.
+    throw new Error(
+      'GitHub denied the request (403). The most likely cause: you used a ' +
+      'FINE-GRAINED token (github_pat_...). Fine-grained tokens can\'t access gists. ' +
+      'Create a CLASSIC token (ghp_...) with the "gist" scope and reconnect.'
+    );
+  }
   if (!resp.ok) {
     let detail = '';
     try { detail = (await resp.json())?.message || ''; } catch {}

@@ -23,20 +23,27 @@ const TYPE_META = {
 
 export async function render(root) {
   showFab();
-  const today = dayKey(Date.now());
-  const now = Date.now();
 
-  setHTML(
-    root,
-    `${renderTopbar({
-      title: `${greetingFor(now)}, ${formatWeekday(now)}`,
-      subtitle: formatDateLong(now),
-    })}
-    <section id="timeline" class="px-6 md:px-12 max-w-3xl mx-auto"></section>`
-  );
+  // Track the day currently rendered. If wall-clock time crosses midnight
+  // while the view is mounted, we re-render with the new day's greeting,
+  // date heading, and entry list.
+  let currentDay = dayKey(Date.now());
+  let midnightTimer = null;
 
-  const refresh = async () => {
-    const entries = await listEntriesByDay(today);
+  const paintShell = () => {
+    const now = Date.now();
+    setHTML(
+      root,
+      `${renderTopbar({
+        title: `${greetingFor(now)}, ${formatWeekday(now)}`,
+        subtitle: formatDateLong(now),
+      })}
+      <section id="timeline" class="px-6 md:px-12 max-w-3xl mx-auto"></section>`
+    );
+  };
+
+  const populateTimeline = async () => {
+    const entries = await listEntriesByDay(currentDay);
     setHTML(
       root.querySelector('#timeline'),
       entries.length ? renderTimeline(entries) : renderEmpty()
@@ -46,14 +53,51 @@ export async function render(root) {
     scrollToLatest(root);
   };
 
-  await refresh();
+  // refresh: reconcile the rendered view with current wall-clock + DB state.
+  // If the day rolled over (midnight passed), rebuild the topbar too.
+  const refresh = async () => {
+    const realDay = dayKey(Date.now());
+    if (realDay !== currentDay) {
+      currentDay = realDay;
+      paintShell();
+      scheduleMidnightTimer();
+    }
+    await populateTimeline();
+  };
+
+  // Schedule a timer that fires 1 second AFTER the next local midnight so
+  // the user's 11:58pm → 12:02am transition clears the old day from view
+  // without them having to interact.
+  const scheduleMidnightTimer = () => {
+    if (midnightTimer) clearTimeout(midnightTimer);
+    const n = new Date();
+    const nextMidnight = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, 0, 0, 1);
+    midnightTimer = setTimeout(refresh, nextMidnight.getTime() - n.getTime());
+  };
+
+  paintShell();
+  await populateTimeline();
+  scheduleMidnightTimer();
 
   // Auto-refresh whenever the DB changes — covers:
   //   • local saves (FAB → modal → addEntry)
   //   • local edits/deletes
   //   • remote sync pulls
-  const off = onDbChanged(() => { refresh(); });
-  return { dispose() { off(); } };
+  const offDb = onDbChanged(() => { refresh(); });
+  // Also check when the tab regains focus — a phone that slept across
+  // midnight won't have fired the setTimeout on time.
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') refresh();
+  };
+  document.addEventListener('visibilitychange', onVisible);
+
+  return {
+    dispose() {
+      offDb();
+      document.removeEventListener('visibilitychange', onVisible);
+      if (midnightTimer) clearTimeout(midnightTimer);
+    },
+  };
 }
 
 // Scroll the page to the bottom so the latest entry is in view.
