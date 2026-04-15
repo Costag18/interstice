@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+.firecrawl/
+*.log
+.vscode/
+.idea/
+Thumbs.db

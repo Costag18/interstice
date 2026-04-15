@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#1a120b" />
+  <title>Interstice — The Analog Pause</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&family=Plus+Jakarta+Sans:wght@200..800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            background: '#1a120b',
+            surface: '#1a120b',
+            'surface-dim': '#1a120b',
+            'surface-bright': '#42372f',
+            'surface-container-lowest': '#140d07',
+            'surface-container-low': '#221a13',
+            'surface-container': '#271e17',
+            'surface-container-high': '#322821',
+            'surface-container-highest': '#3d332b',
+            'surface-variant': '#3d332b',
+            'on-surface': '#f0dfd4',
+            'on-surface-variant': '#d1c4bc',
+            'on-background': '#f0dfd4',
+            'inverse-surface': '#f0dfd4',
+            'inverse-on-surface': '#382e27',
+            'inverse-primary': '#8e4d33',
+            outline: '#998f88',
+            'outline-variant': '#4d453f',
+            primary: '#ffb59a',
+            'primary-fixed': '#ffdbce',
+            'primary-fixed-dim': '#ffb59a',
+            'primary-container': '#431301',
+            'on-primary': '#55200a',
+            'on-primary-fixed': '#380d00',
+            'on-primary-fixed-variant': '#71361e',
+            'on-primary-container': '#c2775a',
+            secondary: '#b1ceb0',
+            'secondary-fixed': '#cdeacb',
+            'secondary-fixed-dim': '#b1ceb0',
+            'secondary-container': '#344d36',
+            'on-secondary': '#1d3621',
+            'on-secondary-fixed': '#08200d',
+            'on-secondary-fixed-variant': '#344d36',
+            'on-secondary-container': '#a0bd9f',
+            tertiary: '#f0bd8b',
+            'tertiary-fixed': '#ffdcbd',
+            'tertiary-fixed-dim': '#f0bd8b',
+            'tertiary-container': '#371d00',
+            'on-tertiary': '#482904',
+            'on-tertiary-fixed': '#2c1600',
+            'on-tertiary-fixed-variant': '#623f18',
+            'on-tertiary-container': '#ae8154',
+            'surface-tint': '#ffb59a',
+            error: '#ffb4ab',
+            'error-container': '#93000a',
+            'on-error': '#690005',
+            'on-error-container': '#ffdad6',
+          },
+          borderRadius: { DEFAULT: '0.25rem', lg: '0.5rem', xl: '0.75rem', full: '9999px' },
+          fontFamily: {
+            headline: ['Newsreader', 'serif'],
+            body: ['Newsreader', 'serif'],
+            label: ['Plus Jakarta Sans', 'sans-serif'],
+          },
+        },
+      },
+    }
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="bg-background text-on-surface font-body min-h-screen antialiased">
+  <div class="grain-overlay" aria-hidden="true"></div>
+  <div id="app" class="min-h-screen">
+    <div id="nav-root"></div>
+    <main id="view-root" class="md:ml-64 min-h-screen pb-24 md:pb-0"></main>
+    <div id="fab-root"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="fixed bottom-24 md:bottom-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col gap-2 pointer-events-none"></div>
+  </div>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

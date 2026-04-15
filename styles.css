@@ -1,0 +1,111 @@
+/* Grain overlay — gives the cozy paper-like texture across the whole UI */
+.grain-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  opacity: 0.03;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Light-mode overrides (paper) */
+html.light {
+  background: #f5ebdd;
+  color: #2a211a;
+}
+html.light body {
+  background: #f5ebdd;
+  color: #2a211a;
+}
+html.light .bg-background,
+html.light .bg-surface,
+html.light .bg-surface-dim { background-color: #f5ebdd !important; }
+html.light .bg-surface-container-low { background-color: #ece0d0 !important; }
+html.light .bg-surface-container { background-color: #e5d6c2 !important; }
+html.light .bg-surface-container-high { background-color: #ddccb5 !important; }
+html.light .bg-surface-container-highest { background-color: #d4c1a8 !important; }
+html.light .bg-surface-variant { background-color: #d4c1a8 !important; }
+html.light .bg-surface-bright { background-color: #f0e3d0 !important; }
+html.light .text-on-surface { color: #2a211a !important; }
+html.light .text-on-surface-variant { color: #5a4a3d !important; }
+html.light .text-on-background { color: #2a211a !important; }
+/* Tailwind opacity modifiers compile to color-mix; force palette-aware versions */
+html.light .text-on-surface\/60 { color: rgba(42, 33, 26, 0.7) !important; }
+html.light .text-on-surface\/50 { color: rgba(42, 33, 26, 0.6) !important; }
+html.light .text-on-surface\/40 { color: rgba(42, 33, 26, 0.55) !important; }
+html.light .text-on-surface\/30 { color: rgba(42, 33, 26, 0.45) !important; }
+html.light .text-on-surface\/20 { color: rgba(42, 33, 26, 0.3) !important; }
+/* Primary in light mode is a darker terracotta for readability */
+html.light .text-primary { color: #8e4d33 !important; }
+html.light .border-primary { border-color: #8e4d33 !important; }
+html.light .bg-primary { background-color: #8e4d33 !important; }
+html.light .text-on-primary { color: #ffffff !important; }
+html.light .text-tertiary { color: #7c5318 !important; }
+html.light .text-secondary { color: #4a6b4c !important; }
+html.light .grain-overlay { mix-blend-mode: multiply; opacity: 0.05; }
+
+/* Light-mode nav: paper-tinted instead of dark walnut */
+html.light aside,
+html.light nav[data-nav="bottom"] { background-color: #ece0d0 !important; }
+html.light nav[data-nav="bottom"] { background-color: rgba(236, 224, 208, 0.9) !important; }
+
+/* Buttons that rely on bg-primary keep readable text */
+html.light .text-on-primary-container { color: #2a211a !important; }
+html.light .bg-primary-container { background-color: #ddc0a8 !important; }
+html.light .bg-secondary-container { background-color: #b6cdb1 !important; }
+html.light .text-on-secondary-container { color: #2a3d29 !important; }
+html.light kbd { color: #8e4d33 !important; border-color: rgba(142, 77, 51, 0.4) !important; }
+
+/* Material symbols default weight tuned for the cozy aesthetic */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-outlined.filled {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Dashed connector for timeline gap labels */
+.dashed-line {
+  background-image: linear-gradient(to bottom, #4d453f 33%, transparent 0);
+  background-position: center;
+  background-size: 1px 12px;
+  background-repeat: repeat-y;
+}
+
+/* Slim warm scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3d332b; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #4d453f; }
+
+/* Toast styling — appears in #toast-root */
+.toast {
+  pointer-events: auto;
+  animation: toast-rise 0.3s ease-out;
+}
+@keyframes toast-rise {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Smooth scroll behaviour for in-page anchors */
+html { scroll-behavior: smooth; }
+
+/* Hide spinner on number/date inputs in this design context */
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+  cursor: pointer;
+}
+html.light input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: none;
+}
+
+/* Hide scrollbars on horizontal carousels (used in onboarding) */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Ensure footer of FAB clears bottom-tab nav on mobile */
+@media (max-width: 767px) {
+  #fab { bottom: 5.5rem; }
+}

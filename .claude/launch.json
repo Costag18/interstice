@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "interstice",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "serve", ".", "-p", "5173", "-L"],
+      "port": 5173
+    }
+  ]
+}

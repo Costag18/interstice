@@ -1,0 +1,17 @@
+{
+  "name": "Interstice — The Analog Pause",
+  "short_name": "Interstice",
+  "description": "A local-first interstitial journal. Capture the moments between tasks.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1a120b",
+  "theme_color": "#1a120b",
+  "orientation": "portrait-primary",
+  "categories": ["productivity", "lifestyle"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
