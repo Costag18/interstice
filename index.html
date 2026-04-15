@@ -10,8 +10,43 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://cdn.tailwindcss.com" />
   <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&family=Plus+Jakarta+Sans:wght@200..800&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <style id="splash-css">
+    /* Critical CSS inlined so the splash renders on first paint, before
+       Tailwind, Google Fonts, or app.js have loaded. Without this, the
+       user sees an empty walnut void for 1-2 seconds while resources
+       come in over the network. */
+    html, body { margin: 0; padding: 0; min-height: 100vh; background: #1a120b; color: #f0dfd4; }
+    #splash {
+      position: fixed; inset: 0; z-index: 200;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 0.75rem;
+      background: #1a120b;
+      font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+      transition: opacity 0.35s ease-out;
+    }
+    #splash.gone { opacity: 0; pointer-events: none; }
+    #splash h1 {
+      font-style: italic; font-weight: 500; font-size: 2.75rem; margin: 0;
+      color: #f0dfd4; letter-spacing: -0.01em;
+    }
+    #splash p {
+      font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+      font-size: 0.65rem; letter-spacing: 0.25em; text-transform: uppercase;
+      color: rgba(240, 223, 212, 0.4); margin: 0;
+    }
+    #splash .pulse {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #ffb59a; margin-top: 1.5rem;
+      animation: splash-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes splash-pulse {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50%      { opacity: 1;   transform: scale(1.6); }
+    }
+  </style>
   <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
   <script>
     tailwind.config = {
@@ -80,6 +115,11 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="bg-background text-on-surface font-body min-h-screen antialiased">
+  <div id="splash" aria-label="Loading Interstice">
+    <h1>Interstice</h1>
+    <p>The Analog Pause</p>
+    <div class="pulse"></div>
+  </div>
   <div class="grain-overlay" aria-hidden="true"></div>
   <div id="app" class="min-h-screen">
     <div id="nav-root"></div>

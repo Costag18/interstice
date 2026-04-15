@@ -56,15 +56,25 @@ export async function render(root) {
   return { dispose() { off(); } };
 }
 
-// Scroll the most-recent entry into view. Entries render ascending,
-// so "latest" = the last <article> in the timeline.
+// Scroll the page to the bottom so the latest entry is in view.
+// Triggered on initial render, after every save, and after every remote pull.
+//
+// We intentionally always scroll — the user explicitly asked for this even when
+// new entries arrive via sync from another device. If you've manually scrolled
+// up to read an old entry and then a sync brings in a new one, you'll be moved
+// back to the bottom — this matches the "live timeline" feel they want.
 function scrollToLatest(root) {
-  // Defer so layout has finished
+  // Two rAFs: first lets the new DOM commit, second lets the browser layout it.
   requestAnimationFrame(() => {
-    const articles = root.querySelectorAll('#timeline article');
-    const last = articles[articles.length - 1];
-    if (!last) return;
-    last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    requestAnimationFrame(() => {
+      const articles = root.querySelectorAll('#timeline article');
+      if (!articles.length) return;
+      // window.scrollTo is more reliable than scrollIntoView for "go to absolute bottom"
+      window.scrollTo({
+        top: document.documentElement.scrollHeight,
+        behavior: 'smooth',
+      });
+    });
   });
 }
 
