@@ -6,6 +6,7 @@ import { showFab } from '../components/fab.js';
 import { calcStreak } from '../helpers/date.js';
 import { navigate } from '../router.js';
 import { setHTML } from '../safe-dom.js';
+import { openAskLLMModal } from '../ask-llm.js';
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -39,6 +40,19 @@ export async function render(root, params) {
     root,
     `${renderTopbar({ title: 'Calendar', subtitle: 'Your reflections, mapped' })}
     <section class="px-6 md:px-12 max-w-6xl mx-auto">
+
+      <button id="ask-llm-btn"
+        class="w-full mb-8 group relative overflow-hidden bg-gradient-to-br from-primary/15 via-tertiary/10 to-secondary/10 border border-tertiary/30 rounded-2xl p-5 md:p-6 flex items-center gap-4 hover:from-primary/20 hover:via-tertiary/15 hover:to-secondary/15 transition text-left">
+        <span class="material-symbols-outlined text-3xl text-tertiary shrink-0">psychology</span>
+        <div class="flex-1 min-w-0">
+          <div class="font-headline text-lg md:text-xl text-on-surface leading-tight">Find patterns in your journal</div>
+          <div class="font-label text-[11px] md:text-xs text-on-surface-variant mt-1 leading-relaxed">
+            Package your entries into a prompt for ChatGPT, Claude, or any LLM — and get back the patterns in your productivity, energy, mood, and distractions.
+          </div>
+        </div>
+        <span class="material-symbols-outlined text-tertiary shrink-0 group-hover:translate-x-0.5 transition">arrow_forward</span>
+      </button>
+
       <div class="flex justify-between items-center mb-8 gap-4 flex-wrap">
         <div class="flex items-center gap-3">
           <button data-nav="prev" aria-label="Previous month"
@@ -66,6 +80,8 @@ export async function render(root, params) {
       </div>
     </section>`
   );
+
+  root.querySelector('#ask-llm-btn').addEventListener('click', () => openAskLLMModal());
 
   root.querySelector('[data-nav="prev"]').addEventListener('click', () => {
     const m = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1);
