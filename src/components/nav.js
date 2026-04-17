@@ -6,6 +6,7 @@ import { getPrefs, setPref } from '../helpers/prefs.js';
 
 const items = [
   { name: 'today', label: 'Today', icon: 'edit_note' },
+  { name: 'hybrid', label: 'Desk', icon: 'splitscreen' },
   { name: 'stickies', label: 'Stickies', icon: 'sticky_note_2' },
   { name: 'calendar', label: 'Calendar', icon: 'calendar_month' },
   { name: 'search', label: 'Search', icon: 'search' },

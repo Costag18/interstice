@@ -5,7 +5,7 @@
 // On fetch: cache-first for same-origin; passthrough for cross-origin
 //           (fonts, YouTube embed); fall back to index.html on offline navigation.
 
-const CACHE = 'interstice-v22';
+const CACHE = 'interstice-v23';
 const SHELL = [
   './',
   './index.html',
@@ -31,6 +31,7 @@ const SHELL = [
   './src/views/calendar.js',
   './src/views/day-detail.js',
   './src/views/stickies.js',
+  './src/views/hybrid.js',
   './src/views/search.js',
   './src/views/about.js',
   './src/views/settings.js',

@@ -21,8 +21,12 @@ const TYPE_META = {
   idea: { label: '💡 Idea', color: 'text-primary', border: 'border-primary/40' },
 };
 
-export async function render(root) {
-  showFab();
+export async function render(root, params) {
+  // Embedded mode — mounted inside a Desk (hybrid) pane. Skip the global
+  // topbar (the hybrid view renders its own) and let the parent manage the
+  // FAB so it doesn't fight with the stickies pane's state.
+  const embedded = !!(params && params.embedded);
+  if (!embedded) showFab();
 
   // Track the day currently rendered. If wall-clock time crosses midnight
   // while the view is mounted, we re-render with the new day's greeting,
@@ -32,14 +36,19 @@ export async function render(root) {
 
   const paintShell = () => {
     const now = Date.now();
-    setHTML(
-      root,
-      `${renderTopbar({
-        title: `${greetingFor(now)}, ${formatWeekday(now)}`,
-        subtitle: formatDateLong(now),
-      })}
-      <section id="timeline" class="px-6 md:px-12 max-w-3xl mx-auto"></section>`
-    );
+    const topbar = embedded
+      ? `<header class="px-2 md:px-4 pt-2 pb-4">
+           <span class="font-label text-[10px] text-tertiary uppercase tracking-[0.2em]">${formatDateLong(now)}</span>
+           <h2 class="text-xl md:text-2xl font-headline italic text-on-surface mt-1 leading-tight">${greetingFor(now)}, ${formatWeekday(now)}</h2>
+         </header>`
+      : renderTopbar({
+          title: `${greetingFor(now)}, ${formatWeekday(now)}`,
+          subtitle: formatDateLong(now),
+        });
+    const timelineWrap = embedded
+      ? `<section id="timeline" class="px-2 md:px-4 pb-8"></section>`
+      : `<section id="timeline" class="px-6 md:px-12 max-w-3xl mx-auto"></section>`;
+    setHTML(root, `${topbar}${timelineWrap}`);
   };
 
   const populateTimeline = async () => {
@@ -50,7 +59,7 @@ export async function render(root) {
     );
     bindEntryActions(root, refresh);
     bindEmptyAction(root, refresh);
-    scrollToLatest(root);
+    scrollToLatest(root, embedded);
   };
 
   // refresh: reconcile the rendered view with current wall-clock + DB state.
@@ -107,12 +116,19 @@ export async function render(root) {
 // new entries arrive via sync from another device. If you've manually scrolled
 // up to read an old entry and then a sync brings in a new one, you'll be moved
 // back to the bottom — this matches the "live timeline" feel they want.
-function scrollToLatest(root) {
+function scrollToLatest(root, embedded) {
   // Two rAFs: first lets the new DOM commit, second lets the browser layout it.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       const articles = root.querySelectorAll('#timeline article');
       if (!articles.length) return;
+      if (embedded) {
+        // Inside a hybrid pane, find the nearest scrollable ancestor and
+        // scroll that instead of the window. scrollIntoView handles this
+        // without us having to walk the tree manually.
+        articles[articles.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+        return;
+      }
       // window.scrollTo is more reliable than scrollIntoView for "go to absolute bottom"
       window.scrollTo({
         top: document.documentElement.scrollHeight,

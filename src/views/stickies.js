@@ -44,7 +44,10 @@ const CANVAS_SIZE = 100;
 
 // Main entry point called by the router.
 export async function render(root, params) {
-  hideFab();
+  // Embedded mode — mounted inside a Desk (hybrid) pane. Skip the global
+  // topbar and let the parent control the FAB.
+  const embedded = !!(params && params.embedded);
+  if (!embedded) hideFab();
 
   // View state — lives in a closure so it's scoped to this mount and cleaned
   // up when the router disposes the view.
@@ -56,6 +59,7 @@ export async function render(root, params) {
     notes: [],
     menuOpenFor: null,  // note id whose ⋯ menu is open
     composerColor: 'honey', // picked paper color for the next sticky
+    embedded,           // true when mounted inside a Desk pane
     // `busy` = a pointer-based operation is in progress (drag/draw/erase/
     // animating away). While busy, paint() is suppressed so a mid-operation
     // sync-pull or DB-change doesn't wipe the SVG stroke being drawn, the
@@ -152,24 +156,35 @@ function shellMarkup(state) {
   // Wrap the topbar in a sticky container so the drawing toolbar (which
   // lives in its right slot) floats at the top of the viewport as the user
   // scrolls through a long pile of stickies.
+  // Embedded mode skips the global topbar and uses a compact local toolbar
+  // instead — the Desk view renders its own unified topbar.
+  const header = state.embedded
+    ? `<div class="sticky top-0 z-20 bg-surface-container-low/30 backdrop-blur-sm px-2 md:px-4 py-2 flex items-center justify-between gap-2 rounded-t-xl">
+         <span class="font-label text-[10px] text-tertiary uppercase tracking-[0.2em]">Sticky notes</span>
+         ${drawToolbar(state)}
+       </div>`
+    : `<div class="sticky top-0 z-20 bg-background/90 backdrop-blur-sm">
+         ${renderTopbar({
+           title: 'Sticky notes',
+           subtitle: 'Brain dump · Parking lot',
+           right: drawToolbar(state),
+         })}
+       </div>`;
+  const wrapperCls = state.embedded
+    ? 'px-2 md:px-4 pb-4'
+    : 'px-4 md:px-12 max-w-6xl mx-auto pb-32';
   return `
-    <div class="sticky top-0 z-20 bg-background/90 backdrop-blur-sm">
-      ${renderTopbar({
-        title: 'Sticky notes',
-        subtitle: 'Brain dump · Parking lot',
-        right: drawToolbar(state),
-      })}
-    </div>
-    <section class="px-4 md:px-12 max-w-6xl mx-auto pb-32">
-      <div class="flex gap-1 p-1 rounded-full bg-surface-container-low w-max mx-auto mb-6" role="tablist">
+    ${header}
+    <section class="${wrapperCls}">
+      <div class="flex gap-1 p-1 rounded-full bg-surface-container-low w-max mx-auto mb-4" role="tablist">
         ${tabBtn('dump', 'Brain dump', dumpActive)}
         ${tabBtn('parking', 'Parking lot', parkingActive)}
       </div>
-      <p class="text-center text-xs md:text-sm font-label uppercase tracking-[0.2em] text-on-surface/40 mb-6">
+      ${state.embedded ? '' : `<p class="text-center text-xs md:text-sm font-label uppercase tracking-[0.2em] text-on-surface/40 mb-6">
         ${dumpActive
           ? 'Empty your head · drag into Now or Later · toss the rest'
           : 'Capture every interrupting thought · triage when you come up for air'}
-      </p>
+      </p>`}
       <div data-surface data-tab="${state.tab}" data-draw-mode="${state.drawMode ? '1' : '0'}" data-eraser-mode="${state.eraser ? '1' : '0'}"></div>
     </section>`;
 }
@@ -247,7 +262,7 @@ function dumpMarkup(state) {
         accent: 'text-secondary',
       })}
     </div>
-    ${trashBarMarkup()}`;
+    ${trashBarMarkup(state)}`;
 }
 
 function parkingMarkup(state) {
@@ -260,7 +275,7 @@ function parkingMarkup(state) {
         accent: 'text-tertiary',
       })}
     </div>
-    ${trashBarMarkup()}`;
+    ${trashBarMarkup(state)}`;
 }
 
 function composerMarkup(kind, state) {
@@ -321,7 +336,22 @@ function pileMarkup(bucket, label, notes, state, { hint, accent } = {}) {
     </div>`;
 }
 
-function trashBarMarkup() {
+function trashBarMarkup(state) {
+  // In embedded (Desk) mode the trash bar is scoped to the sticky pane so it
+  // doesn't overlap the journal pane. Its position:sticky bottom-0 lifts off
+  // the pane's scroll container's bottom edge.
+  if (state && state.embedded) {
+    return `
+      <div class="sticky bottom-0 z-30 pt-3 pointer-events-none">
+        <div data-drop="trash"
+          class="rounded-full border border-dashed border-error/40 bg-background/85 backdrop-blur
+          py-2 flex items-center justify-center gap-2 text-error/70 font-label text-[10px] uppercase tracking-[0.25em]
+          pointer-events-auto transition-colors">
+          <span class="material-symbols-outlined text-base">content_cut</span>
+          Drop here to shred
+        </div>
+      </div>`;
+  }
   return `
     <div class="fixed left-4 right-4 md:left-64 md:right-12 bottom-4 md:bottom-4 z-30 pointer-events-none">
       <div data-drop="trash"
