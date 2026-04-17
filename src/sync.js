@@ -28,10 +28,12 @@ import {
 
 const GIST_FILENAME = 'interstice.json';
 const GIST_DESCRIPTION = 'Interstice — interstitial journaling sync (private)';
-const PUSH_DEBOUNCE_MS = 1500;            // batched, but felt-as-instant
-const POLL_INTERVAL_MS = 20_000;           // when visible+connected, pull every 20s
+const PUSH_DEBOUNCE_MS = 1500;             // batched, but felt-as-instant
+const POLL_INTERVAL_MS = 60_000;           // pull every 60s while visible+connected
+const VISIBILITY_PULL_MIN_GAP_MS = 10_000; // coalesce rapid tab focus pulls
 const ERROR_BACKOFF_MIN_MS = 30_000;       // after first error, wait 30s
 const ERROR_BACKOFF_MAX_MS = 5 * 60_000;   // cap at 5 minutes
+const RATE_LIMIT_MAX_BACKOFF_MS = 10 * 60_000; // honor Retry-After up to 10 min
 const KEY_CACHE_FIELD = 'sync-encryption-key';
 const STATE_LISTENERS = new Set();
 const PASSPHRASE_LISTENERS = new Set();
@@ -45,7 +47,18 @@ let inFlight = null;
 let dirtyDuringFlight = false;
 let consecutiveErrors = 0;               // drives polling backoff
 let nextPollDueAt = 0;                   // wall-clock ms; polling loop skips until then
+let lastPullAt = 0;                      // coalesces visibility-triggered pulls
 let state = { phase: 'idle', error: null, unlocked: false }; // phase: idle | syncing | error
+
+// Single promise chain that serializes every GitHub request. Prevents a
+// poll-pull and a debounced push from hitting /gists/:id concurrently, which
+// is one of the easiest ways to trip GitHub's secondary rate limit.
+let ghChain = Promise.resolve();
+function withGhLock(fn) {
+  const next = ghChain.then(fn, fn);
+  ghChain = next.catch(() => {});
+  return next;
+}
 
 // ─── Tiny base64 helpers (mirror crypto.js's, kept local to avoid coupling) ─
 function bytesToB64(bytes) {
@@ -208,6 +221,12 @@ export function setAutoSync(on) {
 export async function pull() {
   const meta = getMeta();
   if (!meta.token || !meta.gistId) return; // no remote yet
+  return withGhLock(() => pullImpl());
+}
+async function pullImpl() {
+  const meta = getMeta();
+  if (!meta.token || !meta.gistId) return;
+  lastPullAt = Date.now();
   setState({ phase: 'syncing', error: null });
   try {
     const gist = await ghFetch(`/gists/${meta.gistId}`, { token: meta.token });
@@ -239,7 +258,7 @@ export async function pull() {
     setState({ phase: 'idle', error: null });
     recordSuccess();
   } catch (e) {
-    recordFailure();
+    recordFailure(e?.retryAfterMs);
     setMeta({ lastError: String(e.message || e) });
     setState({ phase: 'error', error: String(e.message || e) });
     throw e;
@@ -248,6 +267,11 @@ export async function pull() {
 
 // Push current local state to gist (creates the gist on first push).
 export async function push() {
+  const meta = getMeta();
+  if (!meta.token) return;
+  return withGhLock(() => pushImpl());
+}
+async function pushImpl() {
   const meta = getMeta();
   if (!meta.token) return;
   setState({ phase: 'syncing', error: null });
@@ -299,7 +323,7 @@ export async function push() {
     setState({ phase: 'idle', error: null });
     recordSuccess();
   } catch (e) {
-    recordFailure();
+    recordFailure(e?.retryAfterMs);
     setMeta({ lastError: String(e.message || e) });
     setState({ phase: 'error', error: String(e.message || e) });
     throw e;
@@ -311,8 +335,17 @@ function recordSuccess() {
   nextPollDueAt = 0;
 }
 
-function recordFailure() {
+// When GitHub tells us how long to wait (Retry-After or X-RateLimit-Reset),
+// honor that exactly rather than using our own exponential backoff — otherwise
+// we either retry too early (more 403s) or wait longer than necessary.
+function recordFailure(retryAfterMs) {
   consecutiveErrors++;
+  if (typeof retryAfterMs === 'number' && retryAfterMs > 0) {
+    const capped = Math.min(retryAfterMs, RATE_LIMIT_MAX_BACKOFF_MS);
+    // Add 1s safety margin so we don't land on the exact reset instant.
+    nextPollDueAt = Date.now() + capped + 1000;
+    return;
+  }
   // 30s, 60s, 120s, 240s, 300s (cap)
   const delay = Math.min(ERROR_BACKOFF_MIN_MS * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_MAX_MS);
   nextPollDueAt = Date.now() + delay;
@@ -402,11 +435,16 @@ export async function startAutoSync() {
   onDbChanged(() => {
     if (getMeta().token && getMeta().autoSync) scheduleAutoPush();
   });
-  // Pull when the tab regains focus
+  // Pull when the tab regains focus — but coalesce rapid focus changes.
+  // Without this, alt-tabbing fires a pull each time; paired with the poll
+  // loop and a concurrent debounced push, that's enough to trip GitHub's
+  // secondary rate limit.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && getMeta().token && getMeta().autoSync) {
-      pull().catch(() => {});
-    }
+    if (document.visibilityState !== 'visible') return;
+    if (!getMeta().token || !getMeta().autoSync) return;
+    if (Date.now() - lastPullAt < VISIBILITY_PULL_MIN_GAP_MS) return;
+    if (Date.now() < nextPollDueAt) return;
+    pull().catch(() => {});
   });
 
   // Periodic pull while the tab is visible and connected. Catches changes
@@ -457,22 +495,56 @@ async function ghFetch(path, { token, method = 'GET', body } = {}) {
       'Create a new CLASSIC token with the "gist" scope and reconnect.'
     );
   }
-  if (resp.status === 403) {
-    // The most common cause of 403 on /gists is using a fine-grained PAT
-    // (github_pat_...). Fine-grained PATs do not support gists at all.
+  if (resp.status === 204) return null;
+  if (resp.ok) return resp.json();
+
+  // Error path — read body once and inspect headers before deciding what to throw.
+  let payload = null;
+  try { payload = await resp.json(); } catch {}
+  const message = (payload?.message || '').toLowerCase();
+
+  if (resp.status === 403 || resp.status === 429) {
+    const retryAfterMs = parseRetryAfter(resp);
+    const isSecondary = message.includes('secondary rate limit') || message.includes('abuse');
+    const isPrimary = resp.headers.get('X-RateLimit-Remaining') === '0' || message.includes('api rate limit exceeded');
+    if (retryAfterMs != null || isSecondary || isPrimary) {
+      const secs = retryAfterMs != null ? Math.ceil(retryAfterMs / 1000) : null;
+      const kind = isSecondary ? 'secondary rate limit' : 'rate limit';
+      const when = secs != null ? ` Retry in ~${secs}s.` : '';
+      const err = new Error(`GitHub ${kind} hit — the app will back off and retry automatically.${when}`);
+      err.retryAfterMs = retryAfterMs ?? 60_000; // default 60s if GitHub didn't say
+      err.rateLimited = true;
+      throw err;
+    }
+    // Genuine 403: token lacks the `gist` scope, was revoked, or is fine-grained.
     throw new Error(
-      'GitHub denied the request (403). The most likely cause: you used a ' +
-      'FINE-GRAINED token (github_pat_...). Fine-grained tokens can\'t access gists. ' +
-      'Create a CLASSIC token (ghp_...) with the "gist" scope and reconnect.'
+      'GitHub denied the request (403). Your token is missing the "gist" scope, ' +
+      'has been revoked, or is a fine-grained token (which can\'t access gists). ' +
+      'Create a CLASSIC token (ghp_…) with the "gist" scope and reconnect.'
     );
   }
-  if (!resp.ok) {
-    let detail = '';
-    try { detail = (await resp.json())?.message || ''; } catch {}
-    throw new Error(`GitHub ${resp.status}${detail ? `: ${detail}` : ''}`);
+
+  const detail = payload?.message ? `: ${payload.message}` : '';
+  throw new Error(`GitHub ${resp.status}${detail}`);
+}
+
+// Retry-After can be "<seconds>" or an HTTP date. X-RateLimit-Reset is an
+// epoch-second. Return ms to wait, or null if the response carries no signal.
+function parseRetryAfter(resp) {
+  const retryAfter = resp.headers.get('Retry-After');
+  if (retryAfter) {
+    const asInt = Number(retryAfter);
+    if (Number.isFinite(asInt)) return Math.max(0, asInt * 1000);
+    const asDate = Date.parse(retryAfter);
+    if (!Number.isNaN(asDate)) return Math.max(0, asDate - Date.now());
   }
-  if (resp.status === 204) return null;
-  return resp.json();
+  const remaining = resp.headers.get('X-RateLimit-Remaining');
+  const reset = resp.headers.get('X-RateLimit-Reset');
+  if (remaining === '0' && reset) {
+    const resetMs = Number(reset) * 1000;
+    if (Number.isFinite(resetMs)) return Math.max(0, resetMs - Date.now());
+  }
+  return null;
 }
 
 function setState(next) {
