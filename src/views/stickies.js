@@ -78,11 +78,17 @@ export async function render(root, params) {
   // Listeners live on the stable `root` element and persist across re-paints —
   // attaching them here (only once) prevents handler duplication on every DB
   // change, which would otherwise flip toggle-state twice per click.
-  async function paint() {
-    if (state.busy || hasFocusedEditor()) {
+  //
+  // `opts.force` bypasses the busy/focused-editor guard — used after a
+  // capture so the new sticky becomes visible immediately even though the
+  // composer input is still focused.
+  async function paint(opts = {}) {
+    const force = !!opts.force;
+    if (!force && (state.busy || hasFocusedEditor())) {
       state.paintPending = true;
       return;
     }
+    state.paintPending = false;
     state.notes = await listAllNotes();
     setHTML(root, shellMarkup(state));
     const surface = root.querySelector('[data-surface]');
@@ -382,18 +388,12 @@ function stickyMenuMarkup(note) {
         ${swatch('honey')}${swatch('terracotta')}${swatch('sage')}
       </div>
       <div class="px-4 py-2 flex items-center gap-2 border-t border-outline-variant/10">
-        <span class="font-label text-[10px] uppercase tracking-[0.2em] text-on-surface/50 mr-1">Size</span>
-        <button type="button" data-size-delta="-2" data-note-id="${escapeHtml(note.id)}"
-          aria-label="Smaller text"
-          class="w-6 h-6 rounded-full hover:bg-surface-container-highest flex items-center justify-center text-on-surface/70 text-[11px]">
-          A<span class="text-[8px] align-sub">−</span>
-        </button>
-        <span class="tabular-nums text-[11px] text-on-surface/60 min-w-[34px] text-center">${fontSize}px</span>
-        <button type="button" data-size-delta="2" data-note-id="${escapeHtml(note.id)}"
-          aria-label="Larger text"
-          class="w-6 h-6 rounded-full hover:bg-surface-container-highest flex items-center justify-center text-on-surface/80 text-[14px]">
-          A<span class="text-[10px] align-super">+</span>
-        </button>
+        <span class="font-label text-[10px] uppercase tracking-[0.2em] text-on-surface/50">Size</span>
+        <input type="range" data-size-slider data-note-id="${escapeHtml(note.id)}"
+          min="${FONT_SIZE_MIN}" max="${FONT_SIZE_MAX}" step="2" value="${fontSize}"
+          aria-label="Text size"
+          class="flex-1 h-1 accent-primary">
+        <span data-size-label class="tabular-nums text-[10px] text-on-surface/60 min-w-[22px] text-right">${fontSize}</span>
       </div>
       <button type="button" data-menu-action="done" data-id="${escapeHtml(note.id)}"
         class="w-full text-left px-4 py-2 hover:bg-surface-container-highest flex items-center gap-2 border-t border-outline-variant/10">
@@ -484,7 +484,12 @@ function wireSurfaceDelegated(root, state, paint, signal) {
     const input = e.target.closest('[data-composer]');
     if (!input) return;
     e.preventDefault();
+    const kind = input.dataset.composer;
     await captureFromComposer(input, state, paint);
+    // Paint replaced the DOM; refocus the fresh composer so the user can
+    // keep capturing without a click.
+    const next = root.querySelector(`[data-composer="${kind}"]`);
+    if (next) next.focus();
   }, { signal });
   // Clicks inside the surface (composer submit, menu toggles, menu actions)
   root.addEventListener('click', async (e) => {
@@ -494,12 +499,17 @@ function wireSurfaceDelegated(root, state, paint, signal) {
       const kind = submit.dataset.composerSubmit;
       const input = root.querySelector(`[data-composer="${kind}"]`);
       await captureFromComposer(input, state, paint);
+      const next = root.querySelector(`[data-composer="${kind}"]`);
+      if (next) next.focus();
       return;
     }
     const composerSwatch = e.target.closest('[data-composer-color]');
     if (composerSwatch) {
       state.composerColor = composerSwatch.dataset.composerColor;
-      await paint();
+      // Update the swatch ring in place. A full paint() would rebuild the
+      // composer input and wipe any in-progress text the user has started
+      // typing for their new sticky.
+      updateComposerSwatchRings(root, state.composerColor);
       return;
     }
     const changeSwatch = e.target.closest('[data-color-change]');
@@ -509,21 +519,6 @@ function wireSurfaceDelegated(root, state, paint, signal) {
       const color = changeSwatch.dataset.colorChange;
       state.menuOpenFor = null;
       await updateNote(id, { color });
-      return;
-    }
-    const sizeBtn = e.target.closest('[data-size-delta]');
-    if (sizeBtn) {
-      e.stopPropagation();
-      const id = sizeBtn.dataset.noteId;
-      const delta = parseFloat(sizeBtn.dataset.sizeDelta);
-      const note = state.notes.find((n) => n.id === id);
-      const cur = clampFontSize(note?.fontSize);
-      const next = clampFontSize(cur + delta);
-      if (next === cur) return; // already at a bound
-      // Keep the menu open so the user can tap A-/A+ several times in a row.
-      // paint() will run after updateNote → onDbChanged and re-render the
-      // menu with the new size because state.menuOpenFor still points here.
-      await updateNote(id, { fontSize: next });
       return;
     }
     const toggle = e.target.closest('[data-menu-toggle]');
@@ -563,6 +558,29 @@ function wireSurfaceDelegated(root, state, paint, signal) {
     if (!surface) return;
     onPointerDown(e, state, surface, paint);
   }, { signal });
+
+  // Size slider (inside the ⋯ menu). `input` drives a live CSS-var preview
+  // without touching the DB; `change` (fires on release) commits the final
+  // value. While the user is actively sliding, hasFocusedEditor() returns
+  // true (the <input> is focused) so paint() stays queued — the menu won't
+  // rebuild mid-drag and steal focus from the slider.
+  root.addEventListener('input', (e) => {
+    const slider = e.target.closest('[data-size-slider]');
+    if (!slider) return;
+    const id = slider.dataset.noteId;
+    const v = clampFontSize(parseFloat(slider.value));
+    const sticky = root.querySelector(`[data-sticky="${CSS.escape(id)}"]`);
+    if (sticky) sticky.style.setProperty('--sticky-font-size', v + 'px');
+    const label = slider.parentElement?.querySelector('[data-size-label]');
+    if (label) label.textContent = String(v);
+  }, { signal });
+  root.addEventListener('change', async (e) => {
+    const slider = e.target.closest('[data-size-slider]');
+    if (!slider) return;
+    const id = slider.dataset.noteId;
+    const v = clampFontSize(parseFloat(slider.value));
+    await updateNote(id, { fontSize: v });
+  }, { signal });
 }
 
 async function captureFromComposer(input, state, paint) {
@@ -578,12 +596,30 @@ async function captureFromComposer(input, state, paint) {
     order: Date.now(),
   });
   input.value = '';
-  input.focus();
-  // paint will fire via onDbChanged → paint
+  // Force a paint so the new sticky appears right away. Without the force
+  // flag paint is suppressed while the composer is focused, and the sticky
+  // wouldn't show until the user clicked away (~1s felt delay).
+  await paint({ force: true });
 }
 
 function randomRotation() {
   return (Math.random() * 6 - 3);
+}
+
+// Toggle the ring / dim classes on all composer swatches so the selected one
+// lights up without touching the composer input (no paint, no lost keystrokes).
+const SWATCH_ACTIVE = ['ring-2', 'ring-offset-2', 'ring-offset-background', 'ring-on-surface'];
+const SWATCH_INACTIVE = ['opacity-60', 'hover:opacity-100'];
+function updateComposerSwatchRings(root, activeColor) {
+  root.querySelectorAll('[data-composer-color]').forEach((btn) => {
+    const on = btn.dataset.composerColor === activeColor;
+    btn.classList.toggle(SWATCH_ACTIVE[0], on);
+    btn.classList.toggle(SWATCH_ACTIVE[1], on);
+    btn.classList.toggle(SWATCH_ACTIVE[2], on);
+    btn.classList.toggle(SWATCH_ACTIVE[3], on);
+    btn.classList.toggle(SWATCH_INACTIVE[0], !on);
+    btn.classList.toggle(SWATCH_INACTIVE[1], !on);
+  });
 }
 
 // ─── Pointer handling (drag, draw, erase) ───────────────────────────────────
@@ -777,6 +813,9 @@ function startDragging(e, sticky, state, surface, paint) {
     // hover highlights + placeholder gap
     highlightDropUnder(ev.clientX, ev.clientY, surface);
     repositionPlaceholder(placeholder, sticky, ev.clientX, ev.clientY, surface);
+    // Near the top/bottom of the viewport, scroll the page so the user can
+    // drag a sticky onto rows that aren't currently visible.
+    updateEdgeScroll(ev.clientY);
   };
 
   const onUp = async (ev) => {
@@ -785,6 +824,7 @@ function startDragging(e, sticky, state, surface, paint) {
     window.removeEventListener('pointercancel', onUp);
     try { sticky.releasePointerCapture(ev.pointerId); } catch {}
     clearDropHighlights(surface);
+    stopEdgeScroll();
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -1015,6 +1055,39 @@ function getComputedRotation(sticky) {
   const raw = sticky.style.getPropertyValue('--rot') || '0deg';
   const n = parseFloat(raw);
   return Number.isFinite(n) ? n : 0;
+}
+
+// ─── Auto-scroll while dragging near the viewport edges ────────────────────
+// Module-level state: only one drag happens at a time, so a single rAF
+// loop is enough. When the pointer enters the top/bottom 80px band the page
+// scrolls in that direction at a speed proportional to how deep into the
+// band the cursor is (max ~14px/frame). Stops immediately on drop.
+const EDGE_ZONE = 80;
+const EDGE_MAX_SPEED = 14;
+let edgeScrollSpeed = 0;
+let edgeScrollFrame = null;
+function updateEdgeScroll(clientY) {
+  const topDist = clientY;
+  const bottomDist = window.innerHeight - clientY;
+  if (topDist < EDGE_ZONE) {
+    edgeScrollSpeed = -Math.ceil(((EDGE_ZONE - topDist) / EDGE_ZONE) * EDGE_MAX_SPEED);
+  } else if (bottomDist < EDGE_ZONE) {
+    edgeScrollSpeed = Math.ceil(((EDGE_ZONE - bottomDist) / EDGE_ZONE) * EDGE_MAX_SPEED);
+  } else {
+    edgeScrollSpeed = 0;
+  }
+  if (edgeScrollSpeed !== 0 && edgeScrollFrame == null) {
+    const tick = () => {
+      if (edgeScrollSpeed === 0) { edgeScrollFrame = null; return; }
+      window.scrollBy(0, edgeScrollSpeed);
+      edgeScrollFrame = requestAnimationFrame(tick);
+    };
+    edgeScrollFrame = requestAnimationFrame(tick);
+  }
+}
+function stopEdgeScroll() {
+  edgeScrollSpeed = 0;
+  if (edgeScrollFrame) { cancelAnimationFrame(edgeScrollFrame); edgeScrollFrame = null; }
 }
 
 function dropZoneUnder(clientX, clientY) {
