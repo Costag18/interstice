@@ -22,6 +22,7 @@ import {
 import { renderTopbar } from '../components/topbar.js';
 import { hideFab } from '../components/fab.js';
 import { setHTML, escapeHtml } from '../safe-dom.js';
+import { getPrefs, setPref } from '../helpers/prefs.js';
 
 // Three paper colors drawn from the existing walnut palette. Rotated deterministically
 // per note based on creation time so stickies never all look identical.
@@ -60,6 +61,7 @@ export async function render(root, params) {
     menuOpenFor: null,  // note id whose ⋯ menu is open
     composerColor: 'honey', // picked paper color for the next sticky
     embedded,           // true when mounted inside a Desk pane
+    stickyScale: clampStickyScale(getPrefs().stickyScale),
     // `busy` = a pointer-based operation is in progress (drag/draw/erase/
     // animating away). While busy, paint() is suppressed so a mid-operation
     // sync-pull or DB-change doesn't wipe the SVG stroke being drawn, the
@@ -112,6 +114,11 @@ export async function render(root, params) {
   // Expose on state so the free-standing pointer handlers can toggle busy
   // without an extra arg threaded through every signature.
   state.setBusy = setBusy;
+
+  // Apply the persisted sticky-scale to <html> so it's in effect before the
+  // first paint. The scale is global — the CSS variable stays set even if
+  // the user navigates away.
+  applyStickyScale(state.stickyScale);
 
   // An AbortController lets every listener on `root` / `document` be torn
   // down in one call on view dispose — otherwise they'd leak across mounts
@@ -200,6 +207,9 @@ function tabBtn(name, label, active) {
 }
 
 // Toolbar in the topbar's right slot — toggles draw mode, picks pen color, eraser.
+// The sticky-size slider lives at the left of the group: it scales every
+// sticky's width/height via the --sticky-scale CSS variable so the user
+// can choose how many fit on screen.
 function drawToolbar(state) {
   const penBtn = (color) => {
     const active = state.drawMode && !state.eraser && state.pen === color;
@@ -210,8 +220,19 @@ function drawToolbar(state) {
       style="${style}"></button>`;
   };
   const eraserActive = state.drawMode && state.eraser;
+  const scale = clampStickyScale(state.stickyScale);
+  const scaleControl = `
+    <label title="Sticky size"
+      class="flex items-center gap-1.5 bg-surface-container rounded-full px-2 py-1">
+      <span class="material-symbols-outlined text-base text-on-surface/60">aspect_ratio</span>
+      <input type="range" data-sticky-scale
+        min="${STICKY_SCALE_MIN}" max="${STICKY_SCALE_MAX}" step="0.1" value="${scale}"
+        aria-label="Sticky size"
+        class="w-16 sm:w-20 h-1 accent-primary cursor-pointer">
+    </label>`;
   return `
     <div class="flex items-center gap-2">
+      ${scaleControl}
       <button type="button" data-draw-toggle aria-pressed="${state.drawMode}"
         title="Toggle draw mode"
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-full font-label text-[10px] uppercase tracking-widest transition-colors
@@ -432,13 +453,28 @@ function stickyMenuMarkup(note) {
     </div>`;
 }
 
-// Keep per-sticky text size in a tight, readable range.
+// Keep per-sticky text size in a readable range. Max raised to 48 so users
+// can scale up for vision reasons or to use the sticky as a quick header.
 const FONT_SIZE_MIN = 10;
-const FONT_SIZE_MAX = 28;
-const FONT_SIZE_DEFAULT = 15;
+const FONT_SIZE_MAX = 48;
+const FONT_SIZE_DEFAULT = 20;
 function clampFontSize(v) {
   const n = typeof v === 'number' && Number.isFinite(v) ? v : FONT_SIZE_DEFAULT;
   return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, n));
+}
+
+// Global sticky-note size multiplier — applied via the --sticky-scale CSS
+// variable on <html>. 1.0 is the default 180px/150px note; 0.5 makes them
+// tiny (more fit on screen) and 1.6 makes them large.
+const STICKY_SCALE_MIN = 0.5;
+const STICKY_SCALE_MAX = 1.6;
+const STICKY_SCALE_DEFAULT = 1;
+function clampStickyScale(v) {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : STICKY_SCALE_DEFAULT;
+  return Math.max(STICKY_SCALE_MIN, Math.min(STICKY_SCALE_MAX, n));
+}
+function applyStickyScale(v) {
+  document.documentElement.style.setProperty('--sticky-scale', clampStickyScale(v));
 }
 
 function strokesToSvg(strokes, state) {
@@ -595,14 +631,28 @@ function wireSurfaceDelegated(root, state, paint, signal) {
   // true (the <input> is focused) so paint() stays queued — the menu won't
   // rebuild mid-drag and steal focus from the slider.
   root.addEventListener('input', (e) => {
-    const slider = e.target.closest('[data-size-slider]');
-    if (!slider) return;
-    const id = slider.dataset.noteId;
-    const v = clampFontSize(parseFloat(slider.value));
-    const sticky = root.querySelector(`[data-sticky="${CSS.escape(id)}"]`);
-    if (sticky) sticky.style.setProperty('--sticky-font-size', v + 'px');
-    const label = slider.parentElement?.querySelector('[data-size-label]');
-    if (label) label.textContent = String(v);
+    const fontSlider = e.target.closest('[data-size-slider]');
+    if (fontSlider) {
+      const id = fontSlider.dataset.noteId;
+      const v = clampFontSize(parseFloat(fontSlider.value));
+      const sticky = root.querySelector(`[data-sticky="${CSS.escape(id)}"]`);
+      if (sticky) sticky.style.setProperty('--sticky-font-size', v + 'px');
+      const label = fontSlider.parentElement?.querySelector('[data-size-label]');
+      if (label) label.textContent = String(v);
+      return;
+    }
+    // Global sticky-scale slider in the toolbar.
+    const scaleSlider = e.target.closest('[data-sticky-scale]');
+    if (scaleSlider) {
+      const v = clampStickyScale(parseFloat(scaleSlider.value));
+      state.stickyScale = v;
+      applyStickyScale(v);
+      // Debounce the prefs write so we don't thrash localStorage while the
+      // user is still moving the slider.
+      clearTimeout(scaleSlider._saveTimer);
+      scaleSlider._saveTimer = setTimeout(() => setPref('stickyScale', v), 250);
+      return;
+    }
   }, { signal });
   root.addEventListener('change', async (e) => {
     const slider = e.target.closest('[data-size-slider]');
@@ -787,6 +837,10 @@ function startDragging(e, sticky, state, surface, paint) {
   // dragged sticky would vanish.
   state.setBusy(true);
   const id = sticky.dataset.sticky;
+  // The nearest scrollable ancestor — this is what edge-scroll nudges and
+  // what we listen to for mid-drag scrolls. In the standalone view it's
+  // usually `window`; in the Desk hybrid it's the stickies pane.
+  const scrollTarget = findScrollParent(sticky);
   const startX = e.clientX;
   const startY = e.clientY;
   const baseRot = getComputedRotation(sticky);
@@ -828,6 +882,10 @@ function startDragging(e, sticky, state, surface, paint) {
   let lastT = performance.now();
   let vx = 0, vy = 0;
 
+  // Track the last cursor position — used by the scroll listener (below) and
+  // by the edge-scroll rAF loop to re-run placeholder/highlight logic as
+  // content scrolls under a stationary cursor.
+  let lastCursor = { x: startX, y: startY };
   const onMove = (ev) => {
     const dx = ev.clientX - startX;
     const dy = ev.clientY - startY;
@@ -840,18 +898,35 @@ function startDragging(e, sticky, state, surface, paint) {
     lastX = ev.clientX;
     lastY = ev.clientY;
     lastT = now;
+    lastCursor.x = ev.clientX;
+    lastCursor.y = ev.clientY;
     // hover highlights + placeholder gap
     highlightDropUnder(ev.clientX, ev.clientY, surface);
     repositionPlaceholder(placeholder, sticky, ev.clientX, ev.clientY, surface);
-    // Near the top/bottom of the viewport, scroll the page so the user can
-    // drag a sticky onto rows that aren't currently visible.
-    updateEdgeScroll(ev.clientY);
+    // Near the top/bottom of the scrollable ancestor, auto-scroll so the
+    // user can drag into rows that aren't currently visible.
+    updateEdgeScroll(ev.clientY, scrollTarget, lastCursor, () => {
+      highlightDropUnder(lastCursor.x, lastCursor.y, surface);
+      repositionPlaceholder(placeholder, sticky, lastCursor.x, lastCursor.y, surface);
+    });
   };
+
+  // When the page / pane scrolls (wheel, keyboard, touchpad) while the user
+  // is mid-drag but holding the pointer still, rerun the placeholder logic
+  // with the last cursor position. Without this the insertion slot stays
+  // frozen and the drop zone under the cursor changes invisibly — the user
+  // releases thinking they're on Now, but the drop lands on empty space.
+  const onScroll = () => {
+    highlightDropUnder(lastCursor.x, lastCursor.y, surface);
+    repositionPlaceholder(placeholder, sticky, lastCursor.x, lastCursor.y, surface);
+  };
+  window.addEventListener('scroll', onScroll, { passive: true, capture: true });
 
   const onUp = async (ev) => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', onUp);
+    window.removeEventListener('scroll', onScroll, { capture: true });
     try { sticky.releasePointerCapture(ev.pointerId); } catch {}
     clearDropHighlights(surface);
     stopEdgeScroll();
@@ -917,8 +992,13 @@ function startDragging(e, sticky, state, surface, paint) {
       // the next click startDragging would re-read that inflated rect,
       // growing the sticky by a few pixels with each tap.
       restoreFromDrag(sticky);
-      await updateNote(id, patch);
       state.setBusy(false);
+      await updateNote(id, patch);
+      // Force a paint so the sticky visibly lands in its new bucket even
+      // if paint() was queued (focused editor / busy flag / race with
+      // another notifyChanged). Without this the DB has the new bucket but
+      // the DOM keeps the old position until the next user interaction.
+      await paint({ force: true });
       return;
     }
     // No zone hit. Fall back to off-screen / flick detection.
@@ -1089,27 +1169,46 @@ function getComputedRotation(sticky) {
 
 // ─── Auto-scroll while dragging near the viewport edges ────────────────────
 // Module-level state: only one drag happens at a time, so a single rAF
-// loop is enough. When the pointer enters the top/bottom 80px band the page
-// scrolls in that direction at a speed proportional to how deep into the
-// band the cursor is (max ~14px/frame). Stops immediately on drop.
-const EDGE_ZONE = 80;
-const EDGE_MAX_SPEED = 14;
+// loop is enough. When the pointer enters the top/bottom edge band of the
+// scroll target, we scroll in that direction at a speed proportional to
+// how deep into the band the cursor is. On each scroll tick we also call
+// back so the drag can re-run placeholder/highlight logic — otherwise the
+// cursor stays still (to the eye) but new piles slide under it unnoticed.
+const EDGE_ZONE = 90;
+const EDGE_MAX_SPEED = 22;
 let edgeScrollSpeed = 0;
 let edgeScrollFrame = null;
-function updateEdgeScroll(clientY) {
-  const topDist = clientY;
-  const bottomDist = window.innerHeight - clientY;
-  if (topDist < EDGE_ZONE) {
+let edgeScrollTarget = null;
+let edgeScrollAfterTick = null;
+function updateEdgeScroll(clientY, target, _cursor, afterTick) {
+  // Edge detection uses the target's visible rect: for `window` that's the
+  // viewport, for a pane it's its own bounding rect — a pane that starts
+  // below a top bar must not count the area above as "top edge".
+  const rect = target === window
+    ? { top: 0, bottom: window.innerHeight }
+    : target.getBoundingClientRect();
+  const topDist = clientY - rect.top;
+  const bottomDist = rect.bottom - clientY;
+  if (topDist >= 0 && topDist < EDGE_ZONE) {
     edgeScrollSpeed = -Math.ceil(((EDGE_ZONE - topDist) / EDGE_ZONE) * EDGE_MAX_SPEED);
-  } else if (bottomDist < EDGE_ZONE) {
+  } else if (bottomDist >= 0 && bottomDist < EDGE_ZONE) {
     edgeScrollSpeed = Math.ceil(((EDGE_ZONE - bottomDist) / EDGE_ZONE) * EDGE_MAX_SPEED);
   } else {
     edgeScrollSpeed = 0;
   }
+  edgeScrollTarget = target;
+  edgeScrollAfterTick = afterTick || null;
   if (edgeScrollSpeed !== 0 && edgeScrollFrame == null) {
     const tick = () => {
-      if (edgeScrollSpeed === 0) { edgeScrollFrame = null; return; }
-      window.scrollBy(0, edgeScrollSpeed);
+      if (edgeScrollSpeed === 0 || !edgeScrollTarget) { edgeScrollFrame = null; return; }
+      if (edgeScrollTarget === window) {
+        window.scrollBy(0, edgeScrollSpeed);
+      } else {
+        edgeScrollTarget.scrollTop += edgeScrollSpeed;
+      }
+      if (edgeScrollAfterTick) {
+        try { edgeScrollAfterTick(); } catch {}
+      }
       edgeScrollFrame = requestAnimationFrame(tick);
     };
     edgeScrollFrame = requestAnimationFrame(tick);
@@ -1117,7 +1216,22 @@ function updateEdgeScroll(clientY) {
 }
 function stopEdgeScroll() {
   edgeScrollSpeed = 0;
+  edgeScrollTarget = null;
+  edgeScrollAfterTick = null;
   if (edgeScrollFrame) { cancelAnimationFrame(edgeScrollFrame); edgeScrollFrame = null; }
+}
+
+// Walk up to find the nearest scrollable ancestor. Used by edge-scroll and
+// the mid-drag scroll listener so they target the right container — `window`
+// for standalone pages, the pane element in the Desk hybrid view.
+function findScrollParent(el) {
+  let p = el && el.parentElement;
+  while (p && p !== document.documentElement && p !== document.body) {
+    const s = getComputedStyle(p);
+    if (s.overflowY === 'auto' || s.overflowY === 'scroll') return p;
+    p = p.parentElement;
+  }
+  return window;
 }
 
 function dropZoneUnder(clientX, clientY) {

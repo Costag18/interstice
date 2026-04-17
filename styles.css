@@ -144,9 +144,12 @@ html.sidebar-collapsed .sidebar [data-nav="side"] { padding-left: 0.5rem; paddin
 /* ─── Sticky notes (Stickies view) ──────────────────────────────────────── */
 
 .sticky-note {
-  width: 180px;
-  height: 180px;
-  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+  /* Size is scaled globally by --sticky-scale (set on <html> from prefs).
+     1.0 = the original 180px square; 0.5 = tiny, more fit on screen;
+     1.6 = large, easier to read from across the room. */
+  width: calc(180px * var(--sticky-scale, 1));
+  height: calc(180px * var(--sticky-scale, 1));
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out, width 140ms ease, height 140ms ease;
   cursor: grab;
   touch-action: none; /* pointer events own drag; prevents browser scroll hijack */
 }
@@ -160,7 +163,10 @@ html.sidebar-collapsed .sidebar [data-nav="side"] { padding-left: 0.5rem; paddin
   transition: opacity 120ms ease-out;
 }
 @media (max-width: 640px) {
-  .sticky-note { width: 150px; height: 150px; }
+  .sticky-note {
+    width: calc(150px * var(--sticky-scale, 1));
+    height: calc(150px * var(--sticky-scale, 1));
+  }
 }
 /* In pen mode, every sticky takes a pencil cursor — drawing > dragging.
    The SVG cursor is a small tilted pencil with the hot-spot at the nib (2,20).
