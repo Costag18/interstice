@@ -12,8 +12,11 @@
 //
 // Conflicts: latest-updatedAt-wins per entry. Adequate for a personal journal.
 
-import { listAllEntries, syncImport, onDbChanged, setMetaValue, getMetaValue, deleteMetaValue } from './db.js';
-import { getMeta, setMeta, getTombstones, mergeTombstones, clearMeta, clearTombstones } from './sync-meta.js';
+import { listAllEntries, listAllNotes, syncImport, onDbChanged, setMetaValue, getMetaValue, deleteMetaValue } from './db.js';
+import {
+  getMeta, setMeta, getTombstones, mergeTombstones, clearMeta, clearTombstones,
+  getNoteTombstones, mergeNoteTombstones, clearNoteTombstones,
+} from './sync-meta.js';
 import {
   deriveKey,
   wrapWithKey,
@@ -190,6 +193,7 @@ export async function connect(token) {
 export async function disconnect() {
   clearMeta();
   clearTombstones();
+  clearNoteTombstones();
   await deleteMetaValue(KEY_CACHE_FIELD).catch(() => {});
   unlockPromise = null;
   setState({ phase: 'idle', error: null, unlocked: false });
@@ -229,6 +233,7 @@ export async function pull() {
     }
 
     if (payload?.tombstones) mergeTombstones(payload.tombstones);
+    if (payload?.noteTombstones) mergeNoteTombstones(payload.noteTombstones);
     await syncImport(payload);
     setMeta({ lastSyncAt: Date.now(), lastError: null });
     setState({ phase: 'idle', error: null });
@@ -248,13 +253,17 @@ export async function push() {
   setState({ phase: 'syncing', error: null });
   try {
     const entries = await listAllEntries();
+    const notes = await listAllNotes();
     const tombstones = getTombstones();
+    const noteTombstones = getNoteTombstones();
     const payload = {
       schema: SCHEMA_PLAIN,
       exportedAt: Date.now(),
       device: navigator.userAgent.slice(0, 80),
       entries,
       tombstones,
+      notes,
+      noteTombstones,
     };
     const plaintext = JSON.stringify(payload, null, 2);
 

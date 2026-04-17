@@ -22,6 +22,7 @@ export function mountRouter(root) {
   registerRoute('today', () => import('./views/today.js'));
   registerRoute('calendar', () => import('./views/calendar.js'));
   registerRoute('day', () => import('./views/day-detail.js'));
+  registerRoute('stickies', () => import('./views/stickies.js'));
   registerRoute('search', () => import('./views/search.js'));
   registerRoute('about', () => import('./views/about.js'));
   registerRoute('settings', () => import('./views/settings.js'));

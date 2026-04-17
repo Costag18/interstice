@@ -11,9 +11,10 @@
 // over the full set — fine for tens of thousands of entries.
 
 const DB_NAME = 'interstice';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE = 'entries';
 const META_STORE = 'meta';
+const NOTES_STORE = 'notes';
 
 let dbPromise;
 
@@ -32,6 +33,14 @@ export function openDB() {
       if (!db.objectStoreNames.contains(META_STORE)) {
         db.createObjectStore(META_STORE);
       }
+      // v3: add notes store for the Stickies feature. Entirely separate from
+      // `entries` — different lifecycle, different UI, different destiny
+      // (sticky notes get crumpled and tossed; journal entries are kept).
+      if (!db.objectStoreNames.contains(NOTES_STORE)) {
+        const notes = db.createObjectStore(NOTES_STORE, { keyPath: 'id' });
+        notes.createIndex('by_kind', 'kind');
+        notes.createIndex('by_bucket', 'bucket');
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -46,6 +55,10 @@ function tx(mode = 'readonly') {
 
 function metaTx(mode = 'readonly') {
   return openDB().then((db) => db.transaction(META_STORE, mode).objectStore(META_STORE));
+}
+
+function notesTx(mode = 'readonly') {
+  return openDB().then((db) => db.transaction(NOTES_STORE, mode).objectStore(NOTES_STORE));
 }
 
 // Cache an arbitrary value under a key in the meta store. CryptoKeys with
@@ -141,6 +154,9 @@ export async function deleteEntry(id) {
 //   1. Apply remote tombstones first — delete those entries from local DB.
 //   2. For every remote entry: keep whichever side has the larger `updatedAt`.
 //   3. Local-only entries are left alone (they'll be pushed on the next sync).
+//   4. If the payload carries notes / noteTombstones (v3 feature), merge those
+//      into the notes store using the same rules. Older payloads without these
+//      fields are a no-op on that side.
 export async function syncImport(payload) {
   if (!payload || payload.schema !== 'interstice/v1' || !Array.isArray(payload.entries)) {
     throw new Error('Invalid sync payload');
@@ -168,6 +184,12 @@ export async function syncImport(payload) {
       );
     }
   }
+
+  // Merge notes (v3+). Older gists won't have these fields — just skip.
+  if (Array.isArray(payload.notes)) {
+    await syncImportNotes(payload.notes, payload.noteTombstones || {});
+  }
+
   notifyChanged();
 }
 
@@ -248,14 +270,18 @@ export async function clearAll() {
 
 export async function exportAll() {
   const entries = await listAllEntries();
-  return { schema: 'interstice/v1', exportedAt: Date.now(), entries };
+  const notes = await listAllNotes();
+  return { schema: 'interstice/v1', exportedAt: Date.now(), entries, notes };
 }
 
 export async function importAll(payload, { merge = true } = {}) {
   if (!payload || payload.schema !== 'interstice/v1' || !Array.isArray(payload.entries)) {
     throw new Error('Invalid backup file: expected schema "interstice/v1".');
   }
-  if (!merge) await clearAll();
+  if (!merge) {
+    await clearAll();
+    await clearAllNotes();
+  }
   const store = await tx('readwrite');
   let added = 0,
     skipped = 0;
@@ -277,7 +303,118 @@ export async function importAll(payload, { merge = true } = {}) {
       skipped++;
     }
   }
+  // Notes were added in v3 — tolerate older backups that don't carry them.
+  if (Array.isArray(payload.notes)) {
+    const nstore = await notesTx('readwrite');
+    for (const n of payload.notes) {
+      if (!n.id) { skipped++; continue; }
+      try {
+        await req2promise(nstore.put({
+          ...n,
+          kind: n.kind === 'parking' ? 'parking' : 'dump',
+          strokes: Array.isArray(n.strokes) ? n.strokes : [],
+        }));
+        added++;
+      } catch { skipped++; }
+    }
+  }
   return { added, skipped };
+}
+
+// ─── Notes (Stickies) ───────────────────────────────────────────────────────
+//
+// Note shape:
+//   { id, kind: 'dump'|'parking', bucket: 'unsorted'|'now'|'later'|null,
+//     text, strokes: [{ color, path }], color: 'honey'|'terracotta'|'sage',
+//     rotation: number, order: number, createdAt, updatedAt }
+//
+// Deletion is a hard delete + tombstone (same pattern as entries).
+
+export async function addNote(partial) {
+  const now = Date.now();
+  const note = {
+    id: uid(),
+    kind: partial.kind === 'parking' ? 'parking' : 'dump',
+    bucket: partial.bucket ?? (partial.kind === 'parking' ? null : 'unsorted'),
+    text: partial.text ?? '',
+    strokes: Array.isArray(partial.strokes) ? partial.strokes : [],
+    color: partial.color ?? 'honey',
+    rotation: typeof partial.rotation === 'number' ? partial.rotation : 0,
+    order: typeof partial.order === 'number' ? partial.order : now,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const store = await notesTx('readwrite');
+  await req2promise(store.add(note));
+  notifyChanged();
+  return note;
+}
+
+export async function updateNote(id, patch) {
+  const store = await notesTx('readwrite');
+  const existing = await req2promise(store.get(id));
+  if (!existing) throw new Error(`No note with id ${id}`);
+  const merged = { ...existing, ...patch, updatedAt: Date.now() };
+  await req2promise(store.put(merged));
+  notifyChanged();
+  return merged;
+}
+
+export async function deleteNote(id) {
+  const store = await notesTx('readwrite');
+  await req2promise(store.delete(id));
+  try {
+    const { recordNoteTombstone } = await import('./sync-meta.js');
+    recordNoteTombstone(id);
+  } catch { /* best-effort */ }
+  notifyChanged();
+}
+
+export async function getNote(id) {
+  const store = await notesTx();
+  return req2promise(store.get(id));
+}
+
+export async function listAllNotes() {
+  const store = await notesTx();
+  const rows = await req2promise(store.getAll());
+  return rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+export async function listNotesByKind(kind) {
+  const store = await notesTx();
+  const idx = store.index('by_kind');
+  const rows = await req2promise(idx.getAll(kind));
+  return rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+export async function clearAllNotes() {
+  const store = await notesTx('readwrite');
+  await req2promise(store.clear());
+  notifyChanged();
+}
+
+// Merge remote notes + tombstones from a sync payload.
+// Same resolution rules as syncImport: tombstones first, then latest updatedAt wins.
+export async function syncImportNotes(remoteNotes, remoteNoteTombstones = {}) {
+  if (!Array.isArray(remoteNotes)) return;
+  const store = await notesTx('readwrite');
+  for (const id of Object.keys(remoteNoteTombstones || {})) {
+    try { await req2promise(store.delete(id)); } catch {}
+  }
+  for (const remote of remoteNotes) {
+    if (!remote.id) continue;
+    if (remoteNoteTombstones && remoteNoteTombstones[remote.id]) continue;
+    const existing = await req2promise(store.get(remote.id));
+    if (!existing || (remote.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+      await req2promise(store.put({
+        ...remote,
+        kind: remote.kind === 'parking' ? 'parking' : 'dump',
+        strokes: Array.isArray(remote.strokes) ? remote.strokes : [],
+      }));
+    }
+  }
+  notifyChanged();
 }
 
 export async function estimateUsage() {

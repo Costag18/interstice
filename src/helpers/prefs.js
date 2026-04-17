@@ -1,7 +1,7 @@
 // prefs.js — Tiny localStorage-backed user preferences.
 
 const KEY = 'interstice:prefs';
-const defaults = { theme: 'system', onboarded: false };
+const defaults = { theme: 'system', onboarded: false, sidebarCollapsed: false };
 
 export function getPrefs() {
   try {

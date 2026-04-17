@@ -54,6 +54,44 @@ export function render(root) {
       </div>
 
       <h3 class="text-2xl md:text-3xl font-headline mb-6 flex items-center gap-4">
+        Sticky notes — three analog methods
+        <span class="h-px flex-1 bg-outline-variant/30"></span>
+      </h3>
+      <p class="text-base md:text-lg leading-relaxed text-on-surface-variant mb-6 max-w-3xl">
+        The <a href="#/stickies" class="text-primary underline-offset-4 hover:underline">Stickies</a>
+        section implements two of the three sticky-note methods from the video below
+        — Brain Dump and Parking Lot. The third method (interstitial journaling on
+        sticky notes) <em>is</em> Interstice's Today view.
+      </p>
+
+      <div class="bg-surface-container-low rounded-[2rem] p-4 md:p-8 mb-16">
+        <div class="aspect-video w-full rounded-2xl overflow-hidden shadow-2xl bg-black">
+          <iframe class="w-full h-full"
+            src="https://www.youtube.com/embed/AQcPtIMuOqw"
+            title="Stop Using Apps for ADHD Focus. Try This Instead. — by Novie by the Sea"
+            frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            referrerpolicy="strict-origin-when-cross-origin"
+            allowfullscreen></iframe>
+        </div>
+        <div class="mt-6 flex flex-col md:flex-row gap-6 justify-between md:items-center">
+          <div class="max-w-md">
+            <span class="font-label text-[10px] uppercase tracking-[0.2em] text-secondary block mb-2">Inspiration & Credit</span>
+            <p class="font-body text-sm text-on-surface-variant italic">
+              Video by <strong class="text-on-surface not-italic">Novie by the Sea</strong>.
+              <em>I did not create this video.</em> All credit to the original creator.
+              This is what inspired the Stickies section.
+            </p>
+          </div>
+          <a href="#/stickies"
+             class="inline-flex items-center gap-2 px-6 py-3 bg-primary-container text-on-primary-container rounded-full font-label text-xs font-bold whitespace-nowrap shadow-lg hover:brightness-110 transition">
+            Open Stickies
+            <span class="material-symbols-outlined text-base">sticky_note_2</span>
+          </a>
+        </div>
+      </div>
+
+      <h3 class="text-2xl md:text-3xl font-headline mb-6 flex items-center gap-4">
         Why this method
         <span class="h-px flex-1 bg-outline-variant/30"></span>
       </h3>

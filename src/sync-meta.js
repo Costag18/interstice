@@ -6,6 +6,7 @@
 
 const META_KEY = 'interstice:sync-meta';
 const TOMB_KEY = 'interstice:tombstones';
+const NOTE_TOMB_KEY = 'interstice:note-tombstones';
 const TOMB_TTL_MS = 90 * 24 * 3600 * 1000;
 
 const META_DEFAULTS = {
@@ -72,4 +73,36 @@ export function clearTombstones() {
 function pruneTombstones(obj) {
   const cutoff = Date.now() - TOMB_TTL_MS;
   for (const [id, ts] of Object.entries(obj)) if (ts < cutoff) delete obj[id];
+}
+
+// Note tombstones: parallel set for the stickies feature. Same shape, same TTL.
+export function getNoteTombstones() {
+  try {
+    return JSON.parse(localStorage.getItem(NOTE_TOMB_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+export function recordNoteTombstone(id) {
+  const t = getNoteTombstones();
+  t[id] = Date.now();
+  localStorage.setItem(NOTE_TOMB_KEY, JSON.stringify(t));
+}
+
+export function mergeNoteTombstones(remote) {
+  if (!remote || typeof remote !== 'object') return getNoteTombstones();
+  const local = getNoteTombstones();
+  const merged = { ...local };
+  for (const [id, ts] of Object.entries(remote)) {
+    if (typeof ts !== 'number') continue;
+    if (!merged[id] || ts > merged[id]) merged[id] = ts;
+  }
+  pruneTombstones(merged);
+  localStorage.setItem(NOTE_TOMB_KEY, JSON.stringify(merged));
+  return merged;
+}
+
+export function clearNoteTombstones() {
+  localStorage.removeItem(NOTE_TOMB_KEY);
 }

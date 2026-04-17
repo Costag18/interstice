@@ -109,3 +109,200 @@ html.light input[type="datetime-local"]::-webkit-calendar-picker-indicator {
 @media (max-width: 767px) {
   #fab { bottom: 5.5rem; }
 }
+
+/* ─── Collapsible sidebar (desktop ≥md) ─────────────────────────────────── */
+
+/* Default widths — expanded state */
+.sidebar { width: 16rem; transition: width 220ms ease-out; }
+.sidebar .sidebar-link { justify-content: flex-start; }
+
+/* Collapsed state — only icons are visible, labels fade out. */
+html.sidebar-collapsed .sidebar { width: 4rem; }
+html.sidebar-collapsed .sidebar .sidebar-title,
+html.sidebar-collapsed .sidebar .sidebar-sub,
+html.sidebar-collapsed .sidebar .sidebar-link-label,
+html.sidebar-collapsed .sidebar .sidebar-foot-text { display: none; }
+html.sidebar-collapsed .sidebar .sidebar-head { padding-left: 0; padding-right: 0; text-align: center; }
+html.sidebar-collapsed .sidebar .sidebar-foot { justify-content: center; padding-left: 0; padding-right: 0; }
+html.sidebar-collapsed .sidebar .sidebar-link { padding-left: 0; padding-right: 0; justify-content: center; gap: 0; }
+html.sidebar-collapsed .sidebar [data-nav="side"] { padding-left: 0.5rem; padding-right: 0.5rem; }
+
+/* Main content margin follows sidebar width. index.html's `md:ml-64` is our
+   expanded default — override it when collapsed. */
+@media (min-width: 768px) {
+  html.sidebar-collapsed main { margin-left: 4rem !important; transition: margin-left 220ms ease-out; }
+  main { transition: margin-left 220ms ease-out; }
+}
+
+/* Sticky notes' trash bar uses md:left-64 to clear the sidebar — shrink when
+   the sidebar is collapsed. */
+@media (min-width: 768px) {
+  html.sidebar-collapsed [data-drop="trash"] ~ *,
+  html.sidebar-collapsed .fixed.md\:left-64 { left: 5rem !important; }
+}
+
+/* ─── Sticky notes (Stickies view) ──────────────────────────────────────── */
+
+.sticky-note {
+  width: 180px;
+  height: 180px;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+  cursor: grab;
+  touch-action: none; /* pointer events own drag; prevents browser scroll hijack */
+}
+/* Invisible slot that occupies a sticky's space during drag — makes neighbors
+   reflow to form a visible gap at the cursor's insertion point. */
+.sticky-placeholder {
+  border-radius: 4px;
+  border: 1px dashed rgba(255, 181, 154, 0.25);
+  background: rgba(255, 181, 154, 0.06);
+  box-sizing: border-box;
+  transition: opacity 120ms ease-out;
+}
+@media (max-width: 640px) {
+  .sticky-note { width: 150px; height: 150px; }
+}
+/* In pen mode, every sticky takes a pencil cursor — drawing > dragging.
+   The SVG cursor is a small tilted pencil with the hot-spot at the nib (2,20).
+   Falls back to `crosshair` on browsers that can't resolve the SVG. */
+[data-surface][data-draw-mode="1"] .sticky-note,
+[data-surface][data-draw-mode="1"] .sticky-note .sticky-canvas {
+  cursor: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M2 22l1.4-5.2L14.8 5.3l4.1 4.1L7.5 20.9 2.3 22z' fill='%23f0dfd4' stroke='%231a120b' stroke-width='1.2' stroke-linejoin='round'/%3E%3Cpath d='M15.5 4.7l2.5-2.5a1.5 1.5 0 0 1 2.1 0l1.7 1.7a1.5 1.5 0 0 1 0 2.1l-2.5 2.5z' fill='%23ffb59a' stroke='%231a120b' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E") 2 20, crosshair;
+}
+[data-surface][data-draw-mode="1"][data-eraser-mode="1"] .sticky-note,
+[data-surface][data-draw-mode="1"][data-eraser-mode="1"] .sticky-note .sticky-canvas {
+  cursor: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Crect x='3' y='10' width='14' height='9' rx='1.5' transform='rotate(-20 10 14.5)' fill='%23ffb59a' stroke='%231a120b' stroke-width='1.2'/%3E%3Crect x='3' y='10' width='5' height='9' transform='rotate(-20 5.5 14.5)' fill='%23f0dfd4' stroke='%231a120b' stroke-width='1.2'/%3E%3C/svg%3E") 10 14, cell;
+}
+.sticky-note:hover {
+  transform: rotate(var(--rot)) translateY(-2px);
+  z-index: 5;
+}
+.sticky-note.sticky-dragging {
+  cursor: grabbing;
+  transition: none;
+  box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.55);
+}
+.sticky-paper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  /* Subtle asymmetric shadow for a tangible lift */
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.25),
+    0 10px 20px -6px rgba(0, 0, 0, 0.45),
+    inset 0 -6px 12px rgba(0, 0, 0, 0.04);
+  /* Paper fibre texture from a tiny repeating svg noise */
+  background-image:
+    linear-gradient(135deg, transparent 0%, rgba(0, 0, 0, 0.04) 100%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+  background-blend-mode: multiply;
+  border-radius: 2px;
+  /* Tiny tape-like highlight along top edge */
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+}
+.sticky-paper::before {
+  content: '';
+  position: absolute;
+  top: -6px; left: 50%; transform: translateX(-50%) rotate(-2deg);
+  width: 44px; height: 14px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  pointer-events: none;
+}
+.sticky-text {
+  position: absolute;
+  inset: 18px 12px 12px 12px;
+  font-family: 'Newsreader', Georgia, serif;
+  font-size: 15px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  color: var(--ink);
+}
+.sticky-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none; /* toggled to auto when draw mode on, via inline style */
+}
+.sticky-edit {
+  position: absolute;
+  inset: 18px 12px 12px 12px;
+  font-family: 'Newsreader', Georgia, serif;
+  font-size: 15px;
+  line-height: 1.3;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  width: calc(100% - 24px);
+  height: calc(100% - 30px);
+}
+
+/* Drop zone highlight while dragging a sticky over it */
+[data-drop] { transition: background-color 140ms ease-out, border-color 140ms ease-out; }
+[data-drop].drop-hot { background-color: rgba(255, 181, 154, 0.12); border-color: rgba(255, 181, 154, 0.6); }
+[data-drop="trash"].drop-hot {
+  background-color: rgba(255, 180, 171, 0.18) !important;
+  border-color: rgba(255, 180, 171, 0.8) !important;
+  color: #ffdad6 !important;
+}
+
+/* Shred animation: the sticky splits into vertical strips that tumble and fall
+   away from the drop point. Strips are clones of .sticky-paper (so they carry
+   the text + drawn strokes) clipped to vertical slices. */
+.sticky-shred-wrap {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.sticky-shred {
+  position: absolute !important;
+  inset: 0;
+  animation: sticky-shred-fall 720ms cubic-bezier(0.35, 0.02, 0.9, 0.4) forwards;
+  transform-origin: center 30%;
+  will-change: transform, opacity, filter;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.25),
+    0 12px 22px -8px rgba(0, 0, 0, 0.55);
+}
+@keyframes sticky-shred-fall {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+    filter: brightness(1);
+  }
+  /* Snap separation — the strips split apart without falling yet, like a
+     shredder's blades pulling the paper. */
+  12% {
+    transform:
+      translate(calc(var(--drift) * 0.22), 0)
+      rotate(calc(var(--spin) * 0.08));
+    opacity: 1;
+    filter: brightness(1.04);
+  }
+  /* Tumble starts — strips rotate and start descending. */
+  40% {
+    transform:
+      translate(calc(var(--drift) * 0.55), 70px)
+      rotate(calc(var(--spin) * 0.5));
+    opacity: 0.95;
+    filter: brightness(0.9);
+  }
+  /* Off screen, faded. */
+  100% {
+    transform:
+      translate(var(--drift), 720px)
+      rotate(var(--spin));
+    opacity: 0;
+    filter: brightness(0.65);
+  }
+}
+
+/* Leave a little headroom at the bottom so stickies aren't obscured by the trash bar */
+[data-surface] { padding-bottom: 80px; }
