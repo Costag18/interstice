@@ -28,7 +28,8 @@ import {
 
 const GIST_FILENAME = 'interstice.json';
 const GIST_DESCRIPTION = 'Interstice — interstitial journaling sync (private)';
-const PUSH_DEBOUNCE_MS = 1500;             // batched, but felt-as-instant
+const PUSH_DEBOUNCE_MS = 8000;             // wait 8s after the last DB change before pushing
+const PUSH_MIN_INTERVAL_MS = 15_000;       // at most one PATCH every 15s
 const POLL_INTERVAL_MS = 60_000;           // pull every 60s while visible+connected
 const VISIBILITY_PULL_MIN_GAP_MS = 10_000; // coalesce rapid tab focus pulls
 const ERROR_BACKOFF_MIN_MS = 30_000;       // after first error, wait 30s
@@ -48,6 +49,7 @@ let dirtyDuringFlight = false;
 let consecutiveErrors = 0;               // drives polling backoff
 let nextPollDueAt = 0;                   // wall-clock ms; polling loop skips until then
 let lastPullAt = 0;                      // coalesces visibility-triggered pulls
+let lastPushAt = 0;                      // enforces PUSH_MIN_INTERVAL_MS between PATCHes
 let state = { phase: 'idle', error: null, unlocked: false }; // phase: idle | syncing | error
 
 // Single promise chain that serializes every GitHub request. Prevents a
@@ -154,7 +156,9 @@ export async function changePassphrase(newPassphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(newPassphrase, salt);
   await setMetaValue(KEY_CACHE_FIELD, key);
-  setMeta({ encryptionEnabled: true, encryptionSaltB64: bytesToB64(salt) });
+  // Clear the content-hash cache so the dedupe check doesn't short-circuit
+  // the re-encrypt — the plaintext is unchanged but the envelope isn't.
+  setMeta({ encryptionEnabled: true, encryptionSaltB64: bytesToB64(salt), lastPushedHash: null });
   setState({ unlocked: true });
   await push();
 }
@@ -229,7 +233,17 @@ async function pullImpl() {
   lastPullAt = Date.now();
   setState({ phase: 'syncing', error: null });
   try {
-    const gist = await ghFetch(`/gists/${meta.gistId}`, { token: meta.token });
+    // Conditional GET: if nothing changed remotely since our last pull, GitHub
+    // returns 304 with no body and we skip the whole decode/import dance.
+    const res = await ghGetGist({ gistId: meta.gistId, token: meta.token, etag: meta.gistEtag });
+    if (res.notModified) {
+      setMeta({ lastSyncAt: Date.now(), lastError: null });
+      setState({ phase: 'idle', error: null });
+      recordSuccess();
+      return;
+    }
+    if (res.etag) setMeta({ gistEtag: res.etag });
+    const gist = res.data;
     const file = gist?.files?.[GIST_FILENAME];
     if (!file) throw new Error('Gist has no interstice.json file');
     const text = file.truncated ? await fetch(file.raw_url).then((r) => r.text()) : file.content;
@@ -280,19 +294,29 @@ async function pushImpl() {
     const notes = await listAllNotes();
     const tombstones = getTombstones();
     const noteTombstones = getNoteTombstones();
-    const payload = {
-      schema: SCHEMA_PLAIN,
-      exportedAt: Date.now(),
-      device: navigator.userAgent.slice(0, 80),
-      entries,
-      tombstones,
-      notes,
-      noteTombstones,
-    };
+
+    // Canonical content for dedupe hashing. Excludes exportedAt/device since
+    // those change every push and would defeat the hash check.
+    const content = { schema: SCHEMA_PLAIN, entries, tombstones, notes, noteTombstones };
+    const canonicalJson = JSON.stringify(content);
+    const contentHash = await sha256Hex(canonicalJson);
+    const encOn = !!meta.encryptionEnabled;
+
+    // No-op skip: the gist already reflects this exact content under the same
+    // encryption mode. Kills the push-storm from onDbChanged events that fire
+    // during reads/view-state toggles without actually changing user data.
+    if (meta.gistId && meta.lastPushedHash === contentHash && meta.lastPushedEnc === encOn) {
+      setMeta({ lastSyncAt: Date.now(), lastError: null });
+      setState({ phase: 'idle', error: null });
+      recordSuccess();
+      return;
+    }
+
+    const payload = { ...content, exportedAt: Date.now(), device: navigator.userAgent.slice(0, 80) };
     const plaintext = JSON.stringify(payload, null, 2);
 
     let body;
-    if (meta.encryptionEnabled) {
+    if (encOn) {
       const key = await ensureUnlockedKey(); // may prompt UI
       const salt = b64ToBytes(getMeta().encryptionSaltB64 || '');
       const envelope = await wrapWithKey(key, salt, plaintext);
@@ -319,7 +343,16 @@ async function pushImpl() {
         body: { files: { [GIST_FILENAME]: { content: body } } },
       });
     }
-    setMeta({ lastSyncAt: Date.now(), lastError: null });
+    lastPushAt = Date.now();
+    setMeta({
+      lastSyncAt: Date.now(),
+      lastError: null,
+      lastPushedHash: contentHash,
+      lastPushedEnc: encOn,
+      // Our own PATCH invalidated the server ETag. Clear the cached one so the
+      // next pull fetches fresh instead of wasting a 304 round-trip on stale.
+      gistEtag: null,
+    });
     setState({ phase: 'idle', error: null });
     recordSuccess();
   } catch (e) {
@@ -468,11 +501,17 @@ export async function startAutoSync() {
 
 function scheduleAutoPush() {
   if (pushTimer) clearTimeout(pushTimer);
+  // Delay is the later of: the 8s debounce since the latest edit, and 15s
+  // past the previous PATCH. Keeps us well clear of GitHub's per-gist mutation
+  // burst limit without feeling laggy — journaling doesn't need sub-second sync.
+  const now = Date.now();
+  const throttleDelay = Math.max(0, (lastPushAt + PUSH_MIN_INTERVAL_MS) - now);
+  const delay = Math.max(PUSH_DEBOUNCE_MS, throttleDelay);
   pushTimer = setTimeout(() => {
     pushTimer = null;
     if (inFlight) { dirtyDuringFlight = true; return; }
     push().catch((e) => console.warn('Auto push failed:', e));
-  }, PUSH_DEBOUNCE_MS);
+  }, delay);
 }
 
 // ─── GitHub REST helper ─────────────────────────────────────────────────────
@@ -489,20 +528,37 @@ async function ghFetch(path, { token, method = 'GET', body } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (resp.status === 204) return null;
+  if (resp.ok) return resp.json();
+  throw await parseGhError(resp);
+}
+
+// Conditional GET for /gists/:id. Sends If-None-Match so GitHub returns 304
+// (no body, minimal payload) when nothing has changed. The caller persists
+// the new ETag on 200 responses so subsequent pulls can short-circuit.
+async function ghGetGist({ gistId, token, etag }) {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    Authorization: `Bearer ${token}`,
+  };
+  if (etag) headers['If-None-Match'] = etag;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, { headers });
+  if (resp.status === 304) return { notModified: true };
+  if (!resp.ok) throw await parseGhError(resp);
+  return { data: await resp.json(), etag: resp.headers.get('ETag') };
+}
+
+async function parseGhError(resp) {
+  let payload = null;
+  try { payload = await resp.json(); } catch {}
+  const message = (payload?.message || '').toLowerCase();
   if (resp.status === 401) {
-    throw new Error(
+    return new Error(
       'GitHub rejected the token (401). It was revoked, expired, or typed wrong. ' +
       'Create a new CLASSIC token with the "gist" scope and reconnect.'
     );
   }
-  if (resp.status === 204) return null;
-  if (resp.ok) return resp.json();
-
-  // Error path — read body once and inspect headers before deciding what to throw.
-  let payload = null;
-  try { payload = await resp.json(); } catch {}
-  const message = (payload?.message || '').toLowerCase();
-
   if (resp.status === 403 || resp.status === 429) {
     const retryAfterMs = parseRetryAfter(resp);
     const isSecondary = message.includes('secondary rate limit') || message.includes('abuse');
@@ -512,20 +568,26 @@ async function ghFetch(path, { token, method = 'GET', body } = {}) {
       const kind = isSecondary ? 'secondary rate limit' : 'rate limit';
       const when = secs != null ? ` Retry in ~${secs}s.` : '';
       const err = new Error(`GitHub ${kind} hit — the app will back off and retry automatically.${when}`);
-      err.retryAfterMs = retryAfterMs ?? 60_000; // default 60s if GitHub didn't say
+      err.retryAfterMs = retryAfterMs ?? 60_000;
       err.rateLimited = true;
-      throw err;
+      return err;
     }
-    // Genuine 403: token lacks the `gist` scope, was revoked, or is fine-grained.
-    throw new Error(
+    return new Error(
       'GitHub denied the request (403). Your token is missing the "gist" scope, ' +
       'has been revoked, or is a fine-grained token (which can\'t access gists). ' +
       'Create a CLASSIC token (ghp_…) with the "gist" scope and reconnect.'
     );
   }
-
   const detail = payload?.message ? `: ${payload.message}` : '';
-  throw new Error(`GitHub ${resp.status}${detail}`);
+  return new Error(`GitHub ${resp.status}${detail}`);
+}
+
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(text);
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 // Retry-After can be "<seconds>" or an HTTP date. X-RateLimit-Reset is an

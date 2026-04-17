@@ -13,6 +13,9 @@ const META_DEFAULTS = {
   token: null,             // GitHub PAT
   login: null,             // GitHub login (cached for UI)
   gistId: null,            // The gist used for sync
+  gistEtag: null,          // ETag from last successful pull; enables 304s on next poll
+  lastPushedHash: null,    // SHA-256 of last successfully pushed content; dedupes no-op pushes
+  lastPushedEnc: false,    // whether lastPushedHash was taken while encryption was on
   lastSyncAt: null,        // epoch ms
   lastError: null,         // string | null
   autoSync: true,          // master toggle
