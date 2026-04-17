@@ -307,3 +307,59 @@ html.sidebar-collapsed .sidebar [data-nav="side"] { padding-left: 0.5rem; paddin
 
 /* Leave a little headroom at the bottom so stickies aren't obscured by the trash bar */
 [data-surface] { padding-bottom: 80px; }
+
+/* ─── Desk (hybrid) draggable divider ───────────────────────────────────── */
+
+/* 8px hit target between the two panes. The visual line is drawn inside via
+   the ::after so the pointer has a wider grab zone without making the bar
+   itself thick. */
+.hybrid-divider {
+  flex: 0 0 8px;
+  position: relative;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  transition: background-color 140ms ease;
+  z-index: 5;
+}
+.hybrid-divider::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 2px;
+  background: rgba(255, 181, 154, 0.18);
+  border-radius: 2px;
+  transition: background-color 140ms ease, width 140ms ease;
+}
+.hybrid-divider:hover::after,
+.hybrid-divider.hybrid-dragging::after {
+  background: rgba(255, 181, 154, 0.55);
+  width: 3px;
+}
+/* Vertical stack (narrow screens) — flip orientation. */
+@media (max-width: 1023px) {
+  .hybrid-divider {
+    flex: 0 0 8px;
+    cursor: row-resize;
+  }
+  .hybrid-divider::after {
+    width: auto;
+    height: 2px;
+    left: 10%;
+    right: 10%;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .hybrid-divider:hover::after,
+  .hybrid-divider.hybrid-dragging::after {
+    height: 3px;
+    width: auto;
+  }
+}
+/* While dragging, give the body a resize cursor too so it doesn't flip back
+   to the default when the pointer briefly slides off the 8px bar. */
+body.hybrid-resizing { cursor: col-resize !important; user-select: none; }
+@media (max-width: 1023px) {
+  body.hybrid-resizing { cursor: row-resize !important; }
+}

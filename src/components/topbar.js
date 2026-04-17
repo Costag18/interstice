@@ -31,7 +31,9 @@ export function renderTopbar({ title, subtitle, right = '' } = {}) {
     </header>`;
 }
 
-function syncIndicator() {
+// Exported so compact views (e.g. the Desk) can drop just the sync dot
+// into a floating bar without rendering the full topbar.
+export function syncIndicator() {
   const s = getSyncStatus();
   if (!s.connected) {
     return `<a href="#/settings" title="Saved on this device only — click to set up sync"
