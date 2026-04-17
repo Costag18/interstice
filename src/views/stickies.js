@@ -56,7 +56,22 @@ export async function render(root, params) {
     notes: [],
     menuOpenFor: null,  // note id whose ⋯ menu is open
     composerColor: 'honey', // picked paper color for the next sticky
+    // `busy` = a pointer-based operation is in progress (drag/draw/erase/
+    // animating away). While busy, paint() is suppressed so a mid-operation
+    // sync-pull or DB-change doesn't wipe the SVG stroke being drawn, the
+    // sticky being dragged, or the shred animation. Any paint() attempted
+    // during busy sets paintPending — flushed once the op completes.
+    busy: false,
+    paintPending: false,
   };
+
+  // Is the user typing into an input/textarea inside this view? If so, a
+  // setHTML repaint would blow away the in-progress edit (editInline's
+  // textarea, or a composer draft). Treat that the same as `busy`.
+  function hasFocusedEditor() {
+    const a = document.activeElement;
+    return !!(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && root.contains(a));
+  }
 
   // Rebuild the DOM tree from scratch. Stickies are cheap to re-render and
   // this lets us stay stateless at the element level — no fragile diffing.
@@ -64,17 +79,39 @@ export async function render(root, params) {
   // attaching them here (only once) prevents handler duplication on every DB
   // change, which would otherwise flip toggle-state twice per click.
   async function paint() {
+    if (state.busy || hasFocusedEditor()) {
+      state.paintPending = true;
+      return;
+    }
     state.notes = await listAllNotes();
     setHTML(root, shellMarkup(state));
     const surface = root.querySelector('[data-surface]');
     paintSurface(surface, state);
   }
 
+  function setBusy(on) {
+    state.busy = on;
+    if (!on) tryFlushPending();
+  }
+  function tryFlushPending() {
+    if (state.paintPending && !state.busy && !hasFocusedEditor()) {
+      state.paintPending = false;
+      paint();
+    }
+  }
+  // Expose on state so the free-standing pointer handlers can toggle busy
+  // without an extra arg threaded through every signature.
+  state.setBusy = setBusy;
+
   // An AbortController lets every listener on `root` / `document` be torn
   // down in one call on view dispose — otherwise they'd leak across mounts
   // (navigate away and back) and duplicate every toggle.
   const ac = new AbortController();
   const signal = ac.signal;
+
+  // When focus leaves a composer/textarea, retry any deferred paint so the
+  // surface catches up to remote changes that arrived while the user was typing.
+  root.addEventListener('focusout', () => setTimeout(tryFlushPending, 0), { signal });
 
   wireHeader(root, state, paint, signal);
   wireSurfaceDelegated(root, state, paint, signal);
@@ -106,12 +143,17 @@ export async function render(root, params) {
 function shellMarkup(state) {
   const dumpActive = state.tab === 'dump';
   const parkingActive = state.tab === 'parking';
+  // Wrap the topbar in a sticky container so the drawing toolbar (which
+  // lives in its right slot) floats at the top of the viewport as the user
+  // scrolls through a long pile of stickies.
   return `
-    ${renderTopbar({
-      title: 'Sticky notes',
-      subtitle: 'Brain dump · Parking lot',
-      right: drawToolbar(state),
-    })}
+    <div class="sticky top-0 z-20 bg-background/90 backdrop-blur-sm">
+      ${renderTopbar({
+        title: 'Sticky notes',
+        subtitle: 'Brain dump · Parking lot',
+        right: drawToolbar(state),
+      })}
+    </div>
     <section class="px-4 md:px-12 max-w-6xl mx-auto pb-32">
       <div class="flex gap-1 p-1 rounded-full bg-surface-container-low w-max mx-auto mb-6" role="tablist">
         ${tabBtn('dump', 'Brain dump', dumpActive)}
@@ -295,10 +337,12 @@ function stickyMarkup(note, state) {
   const menuOpen = state.menuOpenFor === note.id;
   const safeText = escapeHtml(note.text || '').replace(/\n/g, '<br>');
   const strokesSvg = strokesToSvg(note.strokes || [], state);
+  const fontSize = clampFontSize(note.fontSize);
   return `
     <div class="sticky-note group relative select-none"
       data-sticky="${escapeHtml(note.id)}"
       style="--rot:${rot}deg; --paper:${palette.bg}; --ink:${palette.ink};
+             --sticky-font-size:${fontSize}px;
              transform: rotate(var(--rot));">
       <div class="sticky-paper">
         <div class="sticky-text" data-sticky-text>${safeText || '<span class="opacity-40">(empty)</span>'}</div>
@@ -323,9 +367,10 @@ function stickyMenuMarkup(note) {
       class="w-5 h-5 rounded-full transition ${ring}"
       style="background:${PAPER_COLORS[c].bg}"></button>`;
   };
+  const fontSize = clampFontSize(note.fontSize);
   return `
     <div data-menu data-menu-for="${escapeHtml(note.id)}"
-      class="absolute top-8 right-1 z-10 min-w-[160px] rounded-xl bg-surface-container-high shadow-2xl
+      class="absolute top-8 right-1 z-10 min-w-[180px] rounded-xl bg-surface-container-high shadow-2xl
       border border-outline-variant/20 py-1 text-sm font-label"
       style="transform: rotate(calc(var(--rot) * -1));">
       <button type="button" data-menu-action="edit" data-id="${escapeHtml(note.id)}"
@@ -336,11 +381,34 @@ function stickyMenuMarkup(note) {
         <span class="font-label text-[10px] uppercase tracking-[0.2em] text-on-surface/50 mr-1">Color</span>
         ${swatch('honey')}${swatch('terracotta')}${swatch('sage')}
       </div>
+      <div class="px-4 py-2 flex items-center gap-2 border-t border-outline-variant/10">
+        <span class="font-label text-[10px] uppercase tracking-[0.2em] text-on-surface/50 mr-1">Size</span>
+        <button type="button" data-size-delta="-2" data-note-id="${escapeHtml(note.id)}"
+          aria-label="Smaller text"
+          class="w-6 h-6 rounded-full hover:bg-surface-container-highest flex items-center justify-center text-on-surface/70 text-[11px]">
+          A<span class="text-[8px] align-sub">−</span>
+        </button>
+        <span class="tabular-nums text-[11px] text-on-surface/60 min-w-[34px] text-center">${fontSize}px</span>
+        <button type="button" data-size-delta="2" data-note-id="${escapeHtml(note.id)}"
+          aria-label="Larger text"
+          class="w-6 h-6 rounded-full hover:bg-surface-container-highest flex items-center justify-center text-on-surface/80 text-[14px]">
+          A<span class="text-[10px] align-super">+</span>
+        </button>
+      </div>
       <button type="button" data-menu-action="done" data-id="${escapeHtml(note.id)}"
         class="w-full text-left px-4 py-2 hover:bg-surface-container-highest flex items-center gap-2 border-t border-outline-variant/10">
         <span class="material-symbols-outlined text-base">flight_takeoff</span> Mark as done
       </button>
     </div>`;
+}
+
+// Keep per-sticky text size in a tight, readable range.
+const FONT_SIZE_MIN = 10;
+const FONT_SIZE_MAX = 28;
+const FONT_SIZE_DEFAULT = 15;
+function clampFontSize(v) {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : FONT_SIZE_DEFAULT;
+  return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, n));
 }
 
 function strokesToSvg(strokes, state) {
@@ -443,6 +511,21 @@ function wireSurfaceDelegated(root, state, paint, signal) {
       await updateNote(id, { color });
       return;
     }
+    const sizeBtn = e.target.closest('[data-size-delta]');
+    if (sizeBtn) {
+      e.stopPropagation();
+      const id = sizeBtn.dataset.noteId;
+      const delta = parseFloat(sizeBtn.dataset.sizeDelta);
+      const note = state.notes.find((n) => n.id === id);
+      const cur = clampFontSize(note?.fontSize);
+      const next = clampFontSize(cur + delta);
+      if (next === cur) return; // already at a bound
+      // Keep the menu open so the user can tap A-/A+ several times in a row.
+      // paint() will run after updateNote → onDbChanged and re-render the
+      // menu with the new size because state.menuOpenFor still points here.
+      await updateNote(id, { fontSize: next });
+      return;
+    }
     const toggle = e.target.closest('[data-menu-toggle]');
     if (toggle) {
       e.stopPropagation();
@@ -468,7 +551,7 @@ function wireSurfaceDelegated(root, state, paint, signal) {
       } else if (kind === 'edit') {
         // editInline swaps text for a textarea, focuses it, and saves on blur.
         // The blur-save fires updateNote → onDbChanged → paint automatically.
-        await editInline(surface, id);
+        await editInline(surface, id, state);
       }
       return;
     }
@@ -524,7 +607,7 @@ function onPointerDown(e, state, surface, paint) {
     if (!note) return;
 
     if (state.eraser) {
-      startErasing(e, canvas, note);
+      startErasing(e, canvas, note, state);
       return;
     }
 
@@ -538,8 +621,12 @@ function onPointerDown(e, state, surface, paint) {
 
 // Drag-erase: while the pointer is down, any stroke the cursor passes over is
 // removed (visually immediate; DB commit happens once on pointerup).
-function startErasing(e, canvas, note) {
+function startErasing(e, canvas, note, state) {
   e.preventDefault();
+  // Block paint() for the duration of the erase — otherwise a remote sync
+  // pull or concurrent DB write would rebuild the SVG and wipe the half-
+  // erased strokes mid-drag.
+  state.setBusy(true);
   const removed = new Set();
 
   const tryErase = (clientX, clientY) => {
@@ -561,9 +648,10 @@ function startErasing(e, canvas, note) {
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', onUp);
     try { canvas.releasePointerCapture(e.pointerId); } catch {}
-    if (!removed.size) return;
+    if (!removed.size) { state.setBusy(false); return; }
     const strokes = (note.strokes || []).filter((_, i) => !removed.has(i));
     await updateNote(note.id, { strokes });
+    state.setBusy(false);
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
@@ -572,6 +660,9 @@ function startErasing(e, canvas, note) {
 
 function startDrawing(e, canvas, note, state) {
   e.preventDefault();
+  // Block paint() for the duration of the stroke so a remote sync pull or
+  // concurrent DB write can't wipe the half-drawn line out from under us.
+  state.setBusy(true);
   const svgPt = (ev) => {
     const rect = canvas.getBoundingClientRect();
     const x = ((ev.clientX - rect.left) / rect.width) * CANVAS_SIZE;
@@ -609,6 +700,7 @@ function startDrawing(e, canvas, note, state) {
     try { canvas.releasePointerCapture(e.pointerId); } catch {}
     const strokes = [...(note.strokes || []), stroke];
     await updateNote(note.id, { strokes });
+    state.setBusy(false);
   };
   canvas.addEventListener('pointermove', onMove);
   canvas.addEventListener('pointerup', onUp);
@@ -617,6 +709,10 @@ function startDrawing(e, canvas, note, state) {
 
 function startDragging(e, sticky, state, surface, paint) {
   e.preventDefault();
+  // Block paint() until the drag animation + DB write all settle. Without
+  // this, an incoming sync-pull would rebuild the surface mid-drag and the
+  // dragged sticky would vanish.
+  state.setBusy(true);
   const id = sticky.dataset.sticky;
   const startX = e.clientX;
   const startY = e.clientY;
@@ -708,6 +804,7 @@ function startDragging(e, sticky, state, surface, paint) {
     if (zone === 'trash') {
       placeholder.remove();
       await shredAtDropPoint(sticky, id, releaseTransform);
+      state.setBusy(false);
       return;
     }
     if (
@@ -737,6 +834,7 @@ function startDragging(e, sticky, state, surface, paint) {
       });
       placeholder.remove();
       await updateNote(id, patch);
+      state.setBusy(false);
       return;
     }
     // No zone hit. Fall back to off-screen / flick detection.
@@ -744,11 +842,13 @@ function startDragging(e, sticky, state, surface, paint) {
       placeholder.remove();
       await tossOffScreen(sticky, vx, vy);
       await deleteNote(id);
+      state.setBusy(false);
       return;
     }
     // Nowhere to go — put the sticky back where it was.
     restoreFromDrag(sticky);
     placeholder.remove();
+    state.setBusy(false);
     paint();
   };
 
@@ -992,11 +1092,16 @@ function sleep(ms) {
 
 // ─── Edit flow ──────────────────────────────────────────────────────────────
 
-async function editInline(surface, id) {
+async function editInline(surface, id, state) {
   const sticky = surface.querySelector(`[data-sticky="${CSS.escape(id)}"]`);
   if (!sticky) return;
   const textEl = sticky.querySelector('[data-sticky-text]');
   if (!textEl) return;
+
+  // Block paint() for the duration of the edit. hasFocusedEditor() already
+  // covers the typing phase, but an explicit busy flag also covers the tiny
+  // gap between replaceWith and focus, and the save() await.
+  state?.setBusy?.(true);
 
   // Replace static text with a textarea that autosizes. Keep the paper rotated
   // so the edit feels continuous with the sticky below.
@@ -1011,6 +1116,7 @@ async function editInline(surface, id) {
   const save = async () => {
     const v = String(ta.value || '').trim();
     await updateNote(id, { text: v });
+    state?.setBusy?.(false);
     // paint fires via onDbChanged
   };
   ta.addEventListener('blur', save, { once: true });
