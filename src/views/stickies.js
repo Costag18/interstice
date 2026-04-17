@@ -598,6 +598,13 @@ function onPointerDown(e, state, surface, paint) {
   // If click originated on the ⋯ button or menu, let the click handler handle it.
   if (e.target.closest('[data-menu-toggle]') || e.target.closest('[data-menu]')) return;
 
+  // If the click landed on a textarea/input (e.g. the edit-in-place textarea
+  // covering the sticky), let the field handle it natively. Starting a drag
+  // here would steal the focus and, while paint() is suppressed by the focused
+  // editor, leave the sticky lifted into position:fixed — repeated clicks
+  // would compound the inline width/height and balloon the note.
+  if (e.target.closest('input, textarea')) return;
+
   // DRAW / ERASE mode: strokes on the sticky's canvas
   if (state.drawMode) {
     const canvas = sticky.querySelector('[data-canvas]');
@@ -833,6 +840,13 @@ function startDragging(e, sticky, state, surface, paint) {
         surface,
       });
       placeholder.remove();
+      // Always clear the lifted inline styles before handing off to paint.
+      // If paint is suppressed (e.g. user is typing in another sticky's
+      // textarea), the sticky would otherwise stay stuck in position:fixed
+      // with the width/height read from its rotated bounding box — and on
+      // the next click startDragging would re-read that inflated rect,
+      // growing the sticky by a few pixels with each tap.
+      restoreFromDrag(sticky);
       await updateNote(id, patch);
       state.setBusy(false);
       return;
@@ -925,7 +939,13 @@ function computePlaceholderPatch({ placeholder, dragNote, targetBucket, state })
 }
 
 // Undo the inline styles that startDragging applied so the sticky falls back
-// into normal flex layout cleanly (used on snap-back paths).
+// into normal flex layout cleanly. Called on any onUp path that doesn't
+// animate the sticky out — including reorder/no-op paths where paint() may
+// be suppressed (user is editing elsewhere) and therefore can't be relied on
+// to rebuild the DOM as cleanup.
+// Restore the base rotate(var(--rot)) transform rather than clearing to an
+// empty string: the rotation is set inline by stickyMarkup, and a blank
+// transform would leave the sticky un-rotated until the next paint.
 function restoreFromDrag(sticky) {
   sticky.style.position = '';
   sticky.style.left = '';
@@ -933,7 +953,7 @@ function restoreFromDrag(sticky) {
   sticky.style.width = '';
   sticky.style.height = '';
   sticky.style.margin = '';
-  sticky.style.transform = '';
+  sticky.style.transform = 'rotate(var(--rot))';
   sticky.style.zIndex = '';
   sticky.style.willChange = '';
   sticky.style.pointerEvents = '';
